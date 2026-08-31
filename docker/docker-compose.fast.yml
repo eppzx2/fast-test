@@ -1,0 +1,27 @@
+# Separate from wazuh-docker's own compose stack (never touches it).
+# Runs the Flask web app (app.py) as a persistent, health-checked
+# container instead of the one-off `docker run --rm` used for CLI
+# fetch/export operations. This gives `bin/fast status` a real,
+# long-running process to report on for the IOC Collector component.
+#
+# Usage (from project root): docker compose -f docker/docker-compose.fast.yml up -d
+
+services:
+  ioc-collector-web:
+    build:
+      context: ..
+      dockerfile: docker/ioc-collector.Dockerfile
+    image: osint-ioc-collector
+    container_name: fast-ioc-collector-web
+    restart: unless-stopped
+    entrypoint: ["python3", "app.py"]
+    ports:
+      - "5000:5000"
+    volumes:
+      - ../:/app
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request as u; u.urlopen('http://localhost:5000/api/stats', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s

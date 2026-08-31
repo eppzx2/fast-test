@@ -1,0 +1,41 @@
+# Adds Docker-native healthcheck definitions to the official Wazuh
+# compose stack. Deliberately contains NO `volumes:` keys - only
+# `healthcheck:` - so it cannot interfere with Wazuh's own initial
+# file bootstrap (that was the root cause of the earlier ar.conf bug
+# when a previous version of this project bind-mounted /var/ossec/etc
+# subdirectories). See docs/DEPLOYMENT_GUIDE.md for that history.
+#
+# Checks reuse the same authority Wazuh itself uses (wazuh-control)
+# for the Manager, and lightweight TCP checks for Indexer/Dashboard
+# (avoids depending on curl/credentials inside those images).
+
+services:
+  wazuh.manager:
+    healthcheck:
+      test:
+        - "CMD-SHELL"
+        - "/var/ossec/bin/wazuh-control status | grep -q 'wazuh-analysisd is running' && /var/ossec/bin/wazuh-control status | grep -q 'wazuh-remoted is running'"
+      interval: 10s
+      timeout: 10s
+      retries: 9
+      start_period: 45s
+
+  wazuh.indexer:
+    healthcheck:
+      test:
+        - "CMD-SHELL"
+        - "bash -c 'exec 3<>/dev/tcp/127.0.0.1/9200'"
+      interval: 10s
+      timeout: 5s
+      retries: 9
+      start_period: 45s
+
+  wazuh.dashboard:
+    healthcheck:
+      test:
+        - "CMD-SHELL"
+        - "bash -c 'exec 3<>/dev/tcp/127.0.0.1/5601'"
+      interval: 10s
+      timeout: 5s
+      retries: 9
+      start_period: 30s
