@@ -9,11 +9,10 @@
 #      (first run only - this step is skipped on later runs)
 #   2. Generates certificates (first run only)
 #   3. Starts the Wazuh stack with a FULLY DEFAULT configuration
-#   4. Verifies the Manager started up healthy (authd/analysisd/remoted)
-#   5. Copies in the custom detection rule via `docker cp`
-#   6. Builds the IOC Collector image and runs the first collection
-#   7. Copies in the CDB list via `docker cp` and restarts the Manager
-#
+#   4. Verifies the initial Manager state (authd/analysisd/remoted)
+#   5. Builds the IOC Collector image and runs the first collection
+#   6. Installs the CDB list + custom rules, validates them with analysisd -t
+#   7. Restarts the Manager once and verifies the final healthy state
 #
 # REQUIREMENTS: Docker + Docker Compose plugin must be installed
 #
@@ -60,15 +59,15 @@ done
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WAZUH_DIR="$PROJECT_ROOT/wazuh-docker"
 WAZUH_VERSION="v4.9.0"
+WAZUH_MANAGER_CONF="$WAZUH_DIR/single-node/config/wazuh_cluster/wazuh_manager.conf"
 MANAGER_CONTAINER="single-node-wazuh.manager-1"
-HEALTH_CHECK_TIMEOUT=90    # seconds (tuned for the <5min startup target)
-HEALTH_CHECK_INTERVAL=5    # seconds
+HEALTH_CHECK_TIMEOUT=90
+HEALTH_CHECK_INTERVAL=5
 
 echo "════════════════════════════════════════════════════════"
 echo "  F.A.S.T. - Deployment Starting"
 echo "════════════════════════════════════════════════════════"
 
-# --- Prerequisite checks ---
 command -v docker >/dev/null 2>&1 || { echo "✗ Docker is not installed. Install it: https://docs.docker.com/engine/install/"; exit 1; }
 docker compose version >/dev/null 2>&1 || { echo "✗ Docker Compose plugin not found."; exit 1; }
 command -v git >/dev/null 2>&1 || { echo "✗ Git is not installed."; exit 1; }
@@ -76,8 +75,6 @@ command -v git >/dev/null 2>&1 || { echo "✗ Git is not installed."; exit 1; }
 echo "✓ Docker, Docker Compose, Git are available"
 echo ""
 
-# --- Helper function: finds an IP that can be used to connect to the Manager ---
-# Order: 1) value given via --ip, 2) Tailscale IP (if present), 3) public IP, 4) local IP
 _is_valid_ipv4() {
     local ip="$1"
     [[ "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || return 1
@@ -118,26 +115,51 @@ detect_manager_ip() {
         return
     fi
 
-    # None found - return empty, the caller handles this
     echo ""
 }
 
-# --- Helper function: checks whether the Manager is healthy ---
-# Healthy = the wazuh-authd, wazuh-analysisd, wazuh-remoted processes
-# are ALL running AND there are no CRITICAL errors in the logs.
+# Docker keeps a container's log history across `docker restart`. Looking at
+# unbounded `docker logs` therefore makes an old CRITICAL line poison every
+# future health check. Always scope log checks to the CURRENT container start.
+manager_started_at() {
+    docker inspect -f '{{.State.StartedAt}}' "$MANAGER_CONTAINER" 2>/dev/null || true
+}
+
+manager_current_critical_count() {
+    local started_at
+    started_at=$(manager_started_at)
+
+    if [ -z "$started_at" ] || [ "$started_at" = "0001-01-01T00:00:00Z" ]; then
+        echo "1"
+        return
+    fi
+
+    docker logs --since "$started_at" "$MANAGER_CONTAINER" 2>&1 | grep -c "CRITICAL" || true
+}
+
+show_manager_current_errors() {
+    local started_at
+    started_at=$(manager_started_at)
+
+    echo "  Manager errors from the current container start:"
+    if [ -n "$started_at" ] && [ "$started_at" != "0001-01-01T00:00:00Z" ]; then
+        docker logs --since "$started_at" "$MANAGER_CONTAINER" 2>&1 | grep -iE "CRITICAL|ERROR" | tail -50 || true
+    else
+        docker logs --tail 50 "$MANAGER_CONTAINER" 2>&1 || true
+    fi
+}
+
 wait_for_manager_healthy() {
     local elapsed=0
     echo "🔍 Checking Manager health..."
 
     while [ "$elapsed" -lt "$HEALTH_CHECK_TIMEOUT" ]; do
-        local critical_errors
-        critical_errors=$(docker logs "$MANAGER_CONTAINER" 2>&1 | grep -c "CRITICAL" || true)
-
-        local proc_count
+        local critical_errors proc_count
+        critical_errors=$(manager_current_critical_count)
         proc_count=$(docker exec "$MANAGER_CONTAINER" ps aux 2>/dev/null | grep -cE "wazuh-authd|wazuh-analysisd|wazuh-remoted" || true)
 
         if [ "$critical_errors" -eq 0 ] && [ "$proc_count" -ge 3 ]; then
-            echo "✓ Manager is healthy (authd, analysisd, remoted running, no errors)"
+            echo "✓ Manager is healthy (current start: authd, analysisd, remoted running; no CRITICAL errors)"
             return 0
         fi
 
@@ -147,11 +169,52 @@ wait_for_manager_healthy() {
     done
 
     echo "✗ ERROR: Manager did not become healthy within ${HEALTH_CHECK_TIMEOUT} seconds."
-    echo "  For diagnostics: docker logs $MANAGER_CONTAINER | grep -i error"
+    show_manager_current_errors
     return 1
 }
 
-# --- STEP 1: Wazuh Docker Repo ---
+# Wazuh requires every CDB list referenced from a rule to also be registered
+# inside the <ruleset> block of ossec.conf. The official v4.9.0 Docker stack
+# bind-mounts this file into the Manager on every container start, so update
+# the mounted source file idempotently.
+ensure_ioc_list_registered() {
+    local marker="<list>etc/lists/ioc-ips</list>"
+    local tmp_file="${WAZUH_MANAGER_CONF}.fast.$$"
+
+    if grep -Fq "$marker" "$WAZUH_MANAGER_CONF"; then
+        echo "✓ Wazuh CDB list is already registered in ossec.conf"
+        return 0
+    fi
+
+    if awk -v marker="$marker" '
+        BEGIN { inserted = 0 }
+        !inserted && /<\/ruleset>/ {
+            print "    " marker
+            inserted = 1
+        }
+        { print }
+        END { if (!inserted) exit 42 }
+    ' "$WAZUH_MANAGER_CONF" > "$tmp_file"; then
+        mv "$tmp_file" "$WAZUH_MANAGER_CONF"
+        echo "✓ Registered etc/lists/ioc-ips in Wazuh <ruleset>"
+    else
+        rm -f "$tmp_file"
+        echo "✗ ERROR: Could not register etc/lists/ioc-ips in $WAZUH_MANAGER_CONF" >&2
+        return 1
+    fi
+}
+
+validate_manager_configuration() {
+    echo "🧪 Validating Wazuh rules/configuration before restart..."
+    if docker exec "$MANAGER_CONTAINER" /var/ossec/bin/wazuh-analysisd -t; then
+        echo "✓ Wazuh analysis configuration is valid"
+        return 0
+    fi
+
+    echo "✗ ERROR: Wazuh rule/config validation failed. Manager will NOT be restarted." >&2
+    return 1
+}
+
 if [ ! -d "$WAZUH_DIR" ]; then
     echo "📥 Downloading the Wazuh Docker stack ($WAZUH_VERSION)..."
     git clone --branch "$WAZUH_VERSION" --depth 1 https://github.com/wazuh/wazuh-docker.git "$WAZUH_DIR"
@@ -161,7 +224,6 @@ fi
 
 cd "$WAZUH_DIR/single-node"
 
-# --- STEP 2: Certificates ---
 if [ ! -d "config/wazuh_indexer_ssl_certs" ] || [ -z "$(ls -A config/wazuh_indexer_ssl_certs 2>/dev/null)" ]; then
     echo ""
     echo "🔐 Generating SSL certificates..."
@@ -170,40 +232,31 @@ else
     echo "✓ Certificates already exist"
 fi
 
-# If an old override file is still present (from a previous version), remove
-# it - to avoid bind-mount issues. See the NOTE at the top of the file.
 echo "🩺 Applying container healthcheck definitions (no volumes, safe to reuse)..."
 cp "$PROJECT_ROOT/docker/healthcheck.override.yml" "./docker-compose.override.yml"
 
-# --- STEP 3: Starting the Wazuh Stack with a FULLY DEFAULT Configuration ---
 echo ""
 echo "🚀 Starting Wazuh Manager + Indexer + Dashboard..."
 docker compose up -d
 
 echo ""
-echo "⏳ Waiting for containers to start (30 seconds)..."
+echo "⏳ Waiting for containers to start (15 seconds)..."
 sleep 15
 
-# --- STEP 4: Health Check (BEFORE copying in Rules/List) ---
+# A previously broken custom rule can leave analysisd down in the persistent
+# Wazuh volume. If the container itself is still running, continue so this
+# deployment can replace/repair FAST's custom assets and validate them.
 if ! wait_for_manager_healthy; then
-    echo "✗ Deployment stopped - the Manager did not start up healthy."
-    exit 1
+    manager_running=$(docker inspect -f '{{.State.Running}}' "$MANAGER_CONTAINER" 2>/dev/null || echo "false")
+    if [ "$manager_running" = "true" ]; then
+        echo "⚠️  Manager is currently degraded, but the container is running."
+        echo "   Continuing with FAST rule/CDB repair before the final restart."
+    else
+        echo "✗ Deployment stopped - the Manager container is not running."
+        exit 1
+    fi
 fi
 
-# --- STEP 5: Copying in the Custom Detection Rule via docker cp ---
-echo ""
-echo "🔗 Applying the TALON IOC Collector detection rule..."
-docker cp "$PROJECT_ROOT/docker/rules/local_rules.xml" "${MANAGER_CONTAINER}:/var/ossec/etc/rules/local_rules.xml"
-docker restart "$MANAGER_CONTAINER" >/dev/null
-
-echo "⏳ Rechecking health after the restart..."
-sleep 10
-if ! wait_for_manager_healthy; then
-    echo "✗ Deployment stopped - the Manager did not start up healthy after the custom rule."
-    exit 1
-fi
-
-# --- STEP 6: IOC Collector - Build + First Collection ---
 echo ""
 echo "════════════════════════════════════════════════════════"
 echo "  TALON IOC Collector - First Collection"
@@ -237,18 +290,29 @@ else
         --init-db --fetch --export wazuh
 fi
 
-# --- STEP 7: Copying in the CDB List via docker cp ---
 echo ""
-echo "🔄 Copying the CDB list to the Wazuh Manager and applying it..."
+echo "🔗 Installing FAST CDB list and custom detection rules..."
+
 docker cp "$PROJECT_ROOT/sample_output/ioc-ips" "${MANAGER_CONTAINER}:/var/ossec/etc/lists/ioc-ips"
+ensure_ioc_list_registered
+
+docker cp "$WAZUH_MANAGER_CONF" "${MANAGER_CONTAINER}:/var/ossec/etc/ossec.conf"
+docker cp "$PROJECT_ROOT/docker/rules/local_rules.xml" "${MANAGER_CONTAINER}:/var/ossec/etc/rules/local_rules.xml"
+
+if ! validate_manager_configuration; then
+    echo "  Fix docker/rules/local_rules.xml (or the CDB registration) and run ./bin/fast up again."
+    exit 1
+fi
+
+echo ""
+echo "🔄 Restarting Wazuh Manager once to load the validated rules and CDB list..."
 docker restart "$MANAGER_CONTAINER" >/dev/null
 
 echo "⏳ Checking health after the final restart..."
 sleep 10
 if ! wait_for_manager_healthy; then
-    echo "✗ WARNING: The Manager does not appear healthy after copying in the CDB list."
-    echo "  Diagnostics: docker logs $MANAGER_CONTAINER | grep -i error"
-    echo "  (The Dashboard may still work, but check the detection rules)"
+    echo "✗ Deployment failed - Manager is unhealthy after loading FAST rules/CDB."
+    exit 1
 fi
 
 echo ""

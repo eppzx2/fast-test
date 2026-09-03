@@ -147,7 +147,7 @@
     <group>lolbin,masquerading,</group>
   </rule>
   <rule id="100221" level="12">
-    <if_matched_sid>100220</if_matched_sid>
+    <if_sid>100220</if_sid>
     <regex type="pcre2">https?://|--no-check-certificate|-{1,2}(O|output-document)\b</regex>
     <description>LOLBin confirmed: process masquerading as "httpd" ($(audit.exe)) is executing with wget-style arguments - likely wget renamed to evade process-name-based detection.</description>
     <mitre>

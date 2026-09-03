@@ -18,10 +18,9 @@
 #     run, and health verification. deploy.sh is treated as the
 #     single source of truth for "how FAST is deployed."
 #   - Container names (single-node-wazuh.manager-1, etc.) and the
-#     Wazuh health definition (wazuh-authd/analysisd/remoted running,
-#     no CRITICAL log lines) mirror deploy.sh's own
-#     wait_for_manager_healthy() so `status` reports the same notion
-#     of "healthy" that the deployment script itself uses.
+#     Wazuh health definition mirror deploy.sh. CRITICAL log checks are
+#     scoped to the CURRENT container start so errors from an earlier
+#     `docker restart` cannot poison the current status forever.
 #   - `down` intentionally never runs `docker compose down -v` (which
 #     would delete named volumes / persistent data). Only a plain
 #     `docker compose down` is used, exactly as already documented in
@@ -94,6 +93,30 @@ container_state() {
     fi
 }
 
+manager_started_at() {
+    docker inspect -f '{{.State.StartedAt}}' "$MANAGER_CONTAINER" 2>/dev/null || true
+}
+
+manager_current_critical_count() {
+    local started_at
+    started_at=$(manager_started_at)
+
+    if [ -z "$started_at" ] || [ "$started_at" = "0001-01-01T00:00:00Z" ]; then
+        echo "1"
+        return
+    fi
+
+    docker logs --since "$started_at" "$MANAGER_CONTAINER" 2>&1 | grep -c "CRITICAL" || true
+}
+
+manager_current_errors() {
+    local started_at
+    started_at=$(manager_started_at)
+    if [ -n "$started_at" ] && [ "$started_at" != "0001-01-01T00:00:00Z" ]; then
+        docker logs --since "$started_at" "$MANAGER_CONTAINER" 2>&1 | grep -iE "CRITICAL|ERROR" | tail -20 || true
+    fi
+}
+
 # Mirrors deploy.sh's wait_for_manager_healthy() health definition,
 # but as a single one-shot check (no retry loop) for status reporting.
 manager_process_health() {
@@ -101,9 +124,11 @@ manager_process_health() {
         echo "unreachable"
         return
     fi
+
     local critical_errors proc_count
-    critical_errors=$(docker logs "$MANAGER_CONTAINER" 2>&1 | grep -c "CRITICAL" || true)
+    critical_errors=$(manager_current_critical_count)
     proc_count=$(docker exec "$MANAGER_CONTAINER" ps aux 2>/dev/null | grep -cE "wazuh-authd|wazuh-analysisd|wazuh-remoted" || true)
+
     if [ "$critical_errors" -eq 0 ] && [ "$proc_count" -ge 3 ]; then
         echo "healthy"
     else
@@ -281,7 +306,11 @@ cmd_status() {
         if [ "$m_state" = "running" ]; then
             m_health=$(manager_process_health)
             echo ""
-            echo "Wazuh Manager health (authd/analysisd/remoted, no CRITICAL logs): $m_health"
+            echo "Wazuh Manager health (current start only): $m_health"
+            if [ "$m_health" = "unhealthy" ]; then
+                echo "Current-start Manager errors:"
+                manager_current_errors | sed 's/^/  /'
+            fi
         else
             m_health="unreachable"
         fi
@@ -367,10 +396,6 @@ Examples:
   ./bin/fast restart
 EOF
 }
-
-# ------------------------------------------------------------
-# Dispatcher
-# ------------------------------------------------------------
 
 main() {
     local cmd="${1:-}"
