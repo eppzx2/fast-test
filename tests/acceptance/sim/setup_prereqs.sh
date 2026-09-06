@@ -8,8 +8,11 @@
 #
 # It prepares three things the target needs to be attackable/exercisable:
 #   1. OpenSSH server for brute-force simulation
-#   2. Deterministic kernel logging for FAST port-scan test ports
+#   2. Deterministic pre-filter kernel logging for FAST scan test ports
 #   3. auditd execve watch for the later LOLBin simulation
+#
+# The port-scan setup LOGS matching SYN packets but does not ACCEPT/DROP
+# them and does not enable/modify UFW, so it does not change firewall policy.
 #
 # Idempotent: safe to run more than once.
 # ============================================================
@@ -69,11 +72,10 @@ ensure_fast_portscan_logging() {
         apt-get install -y iptables
     fi
 
-    # Tailscale can ACCEPT traffic before UFW's filter rules, which means a
-    # scan of a Tailscale 100.x address may never produce a UFW BLOCK record.
-    # Log only FAST's reserved test ports in mangle/PREROUTING, before those
-    # filter decisions. LOG is non-terminating: it observes packets and does
-    # not itself accept/drop traffic or change the target's security policy.
+    # A Tailscale path can be accepted before a later UFW/filter rule ever sees
+    # the packet. Observe FAST's reserved ports in mangle/PREROUTING instead,
+    # before normal filter decisions. LOG is non-terminating: it records the
+    # SYN and then packet processing continues unchanged.
     local rule=(
         -p tcp --syn
         -m multiport --dports "$PORTS_CSV"
@@ -87,6 +89,9 @@ ensure_fast_portscan_logging() {
         iptables -t mangle -I PREROUTING 1 "${rule[@]}"
         echo "[OK] Added FAST pre-filter port-scan logging rule"
     fi
+
+    # Fail setup rather than claiming success if the exact rule is not active.
+    iptables -t mangle -C PREROUTING "${rule[@]}"
 }
 
 echo "==> [1/3] Installing and enabling OpenSSH server..."
@@ -101,21 +106,6 @@ echo "[OK] sshd is installed and running"
 echo ""
 echo "==> [2/3] Preparing deterministic port-scan logging..."
 ensure_fast_portscan_logging
-
-# Keep explicit UFW deny+log rules as a secondary signal for non-Tailscale
-# paths, but FAST detection no longer depends on UFW seeing the packet.
-if ! command -v ufw >/dev/null 2>&1; then
-    apt-get update -qq
-    apt-get install -y ufw
-fi
-ufw allow OpenSSH >/dev/null 2>&1 || true
-ufw logging medium >/dev/null
-for port in "${PORTS[@]}"; do
-    ufw deny log "${port}/tcp" >/dev/null 2>&1 || true
-done
-yes | ufw enable >/dev/null
-
-echo "[OK] UFW is active; FAST test ports are explicitly DENY+LOG: ${PORTS[*]}"
 ensure_journald_collection
 
 if [ "$AGENT_CONFIG_CHANGED" = true ]; then
@@ -125,6 +115,8 @@ if [ "$AGENT_CONFIG_CHANGED" = true ]; then
     systemctl is-active --quiet wazuh-agent
     echo "[OK] Wazuh agent restarted"
 fi
+
+echo "[OK] FAST scan probes will be logged without changing firewall policy"
 
 echo ""
 echo "==> [3/3] Installing and configuring auditd (for later LOLBin test)..."
