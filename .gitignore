@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+
+# Runtime state
+ioc_database.db
+*.db-journal
+*.log
+
+# Generated deployment checkout / local overrides
+wazuh-docker/
+.env
+.env.*
+!.env.example
+
+# Generated exports (the bundled JSON fixture remains tracked)
+sample_output/ioc_export.csv
+sample_output/ioc-ips
+
+# OS/editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
