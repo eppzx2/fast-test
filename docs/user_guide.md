@@ -1,195 +1,153 @@
-# User Guide
+# FAST IOC Collector — User Guide
 
-How to use the TALON IoC Collector.
+This guide covers the IOC collector independently of the full Wazuh deployment.
+For Wazuh deployment, agents, TLS recovery, and attack simulations, use
+`docs/DEPLOYMENT_GUIDE.md` and `docs/SIMULATION_GUIDE.md`.
 
 ## Setup
 
-### 1. Clone the project
-
 ```bash
-git clone <repo-url>
-cd FAST
+git clone <repo-url> fast-test
+cd fast-test
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
 ```
 
-### 2. Create a virtual environment (optional but recommended)
+For the supported current URLhaus/MalwareBazaar Community APIs:
 
 ```bash
-python -m venv venv
-source venv/bin/activate  # Linux/Mac
-venv\Scripts\activate    # Windows
+cp .env.example .env
+# edit .env and set ABUSECH_AUTH_KEY=...
 ```
 
-### 3. Install dependencies
+`.env` is git-ignored and loaded automatically by the collector.
 
-```bash
-pip install -r requirements.txt
-```
+## CLI
 
-### 4. Initialize the database
+Initialize SQLite:
 
 ```bash
 python cli.py --init-db
 ```
 
----
-
-## Terminal (CLI) Usage
-
-### Fetch from all feeds
+Fetch all feeds:
 
 ```bash
 python cli.py --fetch
 ```
 
-**Output:**
-```
-2026-08-07 10:30:45 - root - INFO - Fetched 150 IOCs from Feodo Tracker
-2026-08-07 10:31:02 - root - INFO - Fetched 280 IOCs from URLhaus
-2026-08-07 10:31:45 - root - INFO - Fetched 95 IOCs from MalwareBazaar
-2026-08-07 10:32:15 - root - INFO - Fetched 420 IOCs from Spamhaus
-Total: 945 IOCs fetched
-```
+Each provider is isolated: one provider can fail while others continue. If
+**every** provider returns zero data, or no records can be normalized/stored,
+the command exits non-zero so automation does not treat an empty refresh as
+success.
 
-### Show IOCs
+Inspect data:
 
 ```bash
 python cli.py --show
-```
-
-### Show the total IOC count
-
-```bash
 python cli.py --count
 ```
 
-**Output:**
-```
-Total IOCs in database: 2,350
-```
-
-### Export as CSV
+Exports:
 
 ```bash
 python cli.py --export csv
-```
-
-**Output:** `sample_output/ioc_export.csv`
-
-### Export as JSON
-
-```bash
 python cli.py --export json
+python cli.py --export both
+python cli.py --export wazuh
 ```
 
-**Output:** `sample_output/ioc_export.json`
+The Wazuh export writes `sample_output/ioc-ips` and succeeds only when there is
+at least one usable IPv4/IPv4-CIDR IOC. Invalid and IPv6 values are skipped.
 
----
+## Web dashboard
 
-## Web Interface Usage
-
-### Start the server
+Local development:
 
 ```bash
 python app.py
 ```
 
-**URL:** `http://localhost:5000`
+Default URL:
 
-### Dashboard
-
-- Home page: IOC statistics
-- Total IOC count
-- Breakdown by IOC type (IP, Domain, Hash, URL)
-- Breakdown by feed
-
-### API Endpoints
-
-#### Get all IOCs (JSON)
-
-```
-GET /api/iocs
+```text
+http://localhost:5000
 ```
 
-**Response:**
-```json
-[
-  {
-    "ioc_value": "192.168.1.1",
-    "ioc_type": "ip",
-    "source_feed": "feodo",
-    "first_seen": "2024-01-10",
-    "last_seen": "2024-01-15",
-    "confidence_score": 75,
-    "tags": ["botnet", "dridex"]
-  },
-  ...
-]
-```
+Flask debug mode is disabled unless `FAST_WEB_DEBUG=1` is explicitly set.
 
-#### Fetch from feeds
+API routes:
 
-```
-POST /api/fetch
-```
+- `GET /api/health` — liveness + IOC count
+- `GET /api/iocs` — paginated/filtered IOC list
+- `POST /api/fetch` — refresh feeds
+- `GET /api/export?format=csv|json` — export file
+- `GET /api/stats` — type/feed/confidence counts
 
-#### Export
+`POST /api/fetch` returns HTTP 503 when all providers return zero data instead
+of pretending the refresh succeeded.
 
-```
-GET /api/export?format=csv
-GET /api/export?format=json
-```
+When FAST runs the web dashboard through Docker, its host port binds to
+`127.0.0.1:5000` by default. Set `FAST_WEB_BIND` in the local `.env` only when
+you intentionally want another interface (for example a Tailscale IP).
 
-#### Get statistics
+## Data behavior
 
-```
-GET /api/stats
-```
+SQLite uniqueness is `(ioc_value, ioc_type)`. Repeated observations merge:
 
----
+- provider names;
+- tags;
+- earliest `first_seen`;
+- latest `last_seen`;
+- confidence score based on distinct provider count.
 
-## Automated Refresh (Optional)
+Times are normalized to UTC ISO-8601.
 
-To automatically fetch from feeds once a day, use `refresh_iocs.sh`
-together with cron:
+## Safe refresh into Wazuh
+
+For a deployed FAST environment use:
 
 ```bash
-crontab -e
-# Add the following line:
-0 3 * * * /full/path/to/ioc-collector/refresh_iocs.sh >> /var/log/fast-refresh.log 2>&1
+./refresh_iocs.sh
 ```
 
-See `docs/DEPLOYMENT_GUIDE.md` for the full setup (this variant also
-pushes refreshed IOCs into Wazuh's detection rules).
+It validates the new CDB, runs Wazuh analysis validation, restarts the Manager,
+and verifies Manager + Filebeat → Indexer health. It exits non-zero on failure.
 
----
+## Tests
+
+Offline deterministic suite:
+
+```bash
+python -m pytest -q tests --ignore=tests/acceptance
+```
+
+Provider live checks are opt-in:
+
+```bash
+FAST_LIVE_FEEDS=1 python -m pytest tests/test_fetchers.py -v
+```
+
+GitHub Actions runs Python compilation, Bash syntax checks, and the deterministic
+offline suite on every push/PR.
 
 ## Troubleshooting
 
-### Database won't open
+If one feed is empty, inspect collector logs and the provider's service status.
+For current abuse.ch Community endpoints, confirm `ABUSECH_AUTH_KEY` exists in
+your local `.env`. Do not commit that file.
+
+If every feed fails, `python cli.py --fetch` now exits with status 1. Fix the
+provider/network/auth problem before running Wazuh refresh again.
+
+If the SQLite DB is disposable and you intentionally want a clean collector DB:
 
 ```bash
-rm ioc_database.db
+rm -f ioc_database.db
 python cli.py --init-db
 ```
 
-### A feed won't fetch
+Do not remove Wazuh Docker volumes just to reset the IOC collector.
 
-- Check the status of the feed's source site
-- Try using a VPN
-- Check the logs: `python cli.py --fetch 2>&1 | grep ERROR`
-
-### Slow export
-
-- With a large number of IOCs (>10K), use JSON export (faster)
-
----
-
-## Responsible Use
-
-This project is intended **for legitimate OSINT purposes only**.
-
-Use threat intelligence responsibly.
-
----
-
-**Last updated:** 2026-08-07
+**Last updated:** 2026-09-06
