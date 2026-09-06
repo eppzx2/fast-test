@@ -28,9 +28,12 @@ def test_ssh_brute_force_triggers_rule_100200(alert_line_count, wait_for_rule_al
 
     since_line = alert_line_count()
 
+    # Use a few attempts above the 5-event threshold. Modern OpenSSH can apply
+    # per-source penalties, so the simulator itself verifies that at least five
+    # attempts actually reached password authentication before returning 0.
     result = subprocess.run(
-        ["bash", str(SIM_SCRIPT), target_host, ssh_user, "5"],
-        capture_output=True, text=True, timeout=60,
+        ["bash", str(SIM_SCRIPT), target_host, ssh_user, "8"],
+        capture_output=True, text=True, timeout=90,
     )
     assert result.returncode == 0, (
         f"simulate_brute_force.sh failed:\nstdout: {result.stdout}\nstderr: {result.stderr}"
@@ -40,9 +43,9 @@ def test_ssh_brute_force_triggers_rule_100200(alert_line_count, wait_for_rule_al
 
     assert alert is not None, (
         f"Rule {RULE_ID} (SSH brute force) did not fire within 60 seconds. "
-        f"Check that sshd authentication logs reach the Manager (Wazuh's default "
-        f"journald collection covers this) and that base rule 5716 is loaded "
-        f"(grep -r 'id=\"5716\"' inside the wazuh-manager container's ruleset)."
+        f"Check that Wazuh is producing sshd authentication_failed alerts "
+        f"(commonly rule 5760 for failed passwords or 5710 for invalid users) "
+        f"and that the event is decoded as sshd."
     )
     assert int(alert["rule"]["level"]) >= 5, (
         f"Rule {RULE_ID} fired but at an unexpectedly low level: {alert['rule']}"
