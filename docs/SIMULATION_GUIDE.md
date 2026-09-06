@@ -1,193 +1,161 @@
-# Attack Simulation Guide
+# FAST Attack Simulation Guide
 
-A practical, step-by-step walkthrough for running the three attack
-simulations (SSH brute force, port scan, LOLBin masquerading) and
-confirming Wazuh detects each one. For the technical reference (exact
-rule IDs, XML, assumptions), see [`docs/runbook.md`](runbook.md) —
-this guide focuses on the "what do I actually type, and on which
-machine" side of things.
+Use this guide to exercise FAST's three Linux detections against a target with
+a connected Wazuh agent.
 
-## 1. The Moving Parts (3 Roles, Not Necessarily 3 Machines)
+## Roles
 
-Every simulation involves up to three roles. Understanding which
-machine plays which role is the single most common source of
-confusion, so read this before running anything.
+- **Manager** — runs the FAST/Wazuh Docker stack and Threat Hunting.
+- **Target** — Linux VM being exercised; Wazuh agent must be Active.
+- **Runner** — machine that sends SSH/port probes. It can be the Manager.
+- LOLBin is different: its simulator must run **on the Target** because auditd
+  observes local process execution.
 
-| Role | What it is | Example |
-|---|---|---|
-| **Manager** | The machine running `./bin/fast up` — hosts Wazuh Manager, Indexer, Dashboard | Your cloud VM |
-| **Target** | The machine being "attacked" — must have a Wazuh **Agent** installed and connected to the Manager | A Linux/Windows host with `install-wazuh-agent.sh`/`.ps1` already run |
-| **Runner** | The machine where you type the `simulate_*.sh` command | Your laptop, or the Target itself |
+A Windows host agent can remain connected for normal Wazuh testing, but these
+three simulations are Linux-specific.
 
-The Manager and Target can be the same machine (useful for a quick
-local test) or different machines (closer to a real deployment). The
-Runner **can be a third machine** for two of the three simulations,
-but **must be the Target itself** for the LOLBin one — this is called
-out explicitly below because it trips people up.
-
-```
- ┌──────────┐        SSH login attempts         ┌──────────┐
- │  Runner  │ ────────────────────────────────> │  Target  │
- │ (laptop) │        port-scan probes           │ (agent)  │
- └──────────┘ ────────────────────────────────> └────┬─────┘
-                                                       │ events
-                                                       ▼
-                                                 ┌──────────┐
-                                                 │ Manager  │
-                                                 │ (Wazuh)  │
-                                                 └──────────┘
-
- LOLBin simulation is different - Runner IS the Target:
-
- ┌──────────────────────┐
- │   Target == Runner    │  (wget is copied/executed locally;
- │  (has agent + auditd) │   auditd only sees local processes)
- └───────────┬───────────┘
-             │ events
-             ▼
-       ┌──────────┐
-       │ Manager  │
-       └──────────┘
-```
-
-## 2. What Each Simulation Actually Does
-
-### SSH Brute Force → attempts to look like a password-guessing attack
-`simulate_brute_force.sh` uses `sshpass` to attempt 5 SSH logins
-against the Target with deliberately wrong passwords, back to back.
-This mimics an attacker guessing credentials. Wazuh's default sshd
-rule already flags each individual failure; our custom rule
-(`100200`) correlates **5 failures from the same source IP within 60
-seconds** into a single, higher-severity brute-force alert.
-
-### Port Scan → attempts to look like reconnaissance (nmap)
-`simulate_port_scan.sh` sends connection attempts to 9 unusual,
-almost-certainly-closed ports on the Target, using `nmap -sS` if
-available (a real SYN scan) or a plain Bash `/dev/tcp` loop as a
-fallback. Each blocked/refused connection is a low-level signal (rule
-`100210`); **8 or more from the same source within 60 seconds**
-escalate to a confirmed port-scan alert (rule `100211`).
-
-### LOLBin → attempts to look like a "living-off-the-land" evasion technique
-`simulate_lolbin.sh` copies the real `wget` binary to `/tmp/httpd`
-(so its process name becomes `httpd`, mimicking a legitimate web
-server to evade name-based detection) and executes it with wget-style
-arguments. `auditd` on the Target captures the process execution;
-Wazuh flags a process calling itself `httpd` but running from a
-non-standard path (rule `100220`), and escalates to a confirmed alert
-(rule `100221`) when the command line also looks like wget's, not
-Apache's.
-
-## 3. One-Time Setup (Do This Before Any Simulation)
-
-1. **Deploy FAST** — on the Manager machine:
-   ```bash
-   ./bin/fast up
-   ```
-2. **Connect an Agent** — on the Target machine (Windows: `windows/install-wazuh-agent.ps1`, Linux: `linux/install-wazuh-agent.sh`). Confirm it shows **Active**:
-   ```bash
-   docker exec single-node-wazuh.manager-1 /var/ossec/bin/agent_control -l
-   ```
-3. **Enable prerequisites for port scan & LOLBin** — on the **Target**, as root (SSH brute force needs no extra setup):
-   ```bash
-   sudo ./tests/acceptance/sim/setup_prereqs.sh
-   ```
-   This turns on UFW connection logging and installs/configures
-   `auditd` to watch process execution. It's safe to re-run.
-
-## 4. Running Each Simulation
-
-### 4.1 SSH Brute Force
-
-**Run from:** the Runner (any machine that can reach the Target over
-SSH — your laptop is fine, it does not need Wazuh installed).
+## 1. Deploy / update Manager
 
 ```bash
-./tests/acceptance/sim/simulate_brute_force.sh <target_host> [ssh_user] [attempts]
+cd ~/fast-test
+git pull
+./bin/fast up
+./bin/fast status
 ```
 
-```bash
-# Example
-./tests/acceptance/sim/simulate_brute_force.sh 100.87.195.65
+Expected core status:
+
+```text
+Wazuh Manager health (current start only): healthy
+Filebeat -> Indexer alert pipeline: healthy
+FAST [ HEALTHY ]
 ```
 
-- `<target_host>` — required; the Target's IP (Tailscale IP recommended)
-- `[ssh_user]` — optional, defaults to a non-existent test username (so no real account is touched)
-- `[attempts]` — optional, defaults to `5`
-
-Requires `sshpass` on the Runner: `sudo apt-get install -y sshpass`.
-
-### 4.2 Port Scan
-
-**Run from:** the Runner (same flexibility as above).
+## 2. Prepare the Linux Target once
 
 ```bash
-./tests/acceptance/sim/simulate_port_scan.sh <target_host>
+cd ~/fast-test
+git pull
+sudo ./tests/acceptance/sim/setup_prereqs.sh
 ```
 
+The setup is idempotent. It:
+
+1. installs/enables OpenSSH;
+2. adds a logging-only `mangle/PREROUTING` rule for FAST ports
+   `56001..56012` with prefix `FAST_PORTSCAN`;
+3. ensures the Wazuh agent collects `journald`;
+4. installs/enables auditd and an `execve` rule with key `audit-wazuh-c`;
+5. ensures the agent collects `/var/log/audit/audit.log` with audit format;
+6. restarts the Wazuh agent only if its collection config changed.
+
+It does not enable UFW or add firewall ACCEPT/DROP policy.
+
+Confirm the target is Active from the Manager:
+
 ```bash
-# Example
-./tests/acceptance/sim/simulate_port_scan.sh 100.87.195.65
+docker exec single-node-wazuh.manager-1 /var/ossec/bin/agent_control -l
 ```
 
-Faster/more realistic with `nmap` installed on the Runner
-(`sudo apt-get install -y nmap`), but works without it.
+## 3. SSH brute-force test
 
-### 4.3 LOLBin (wget masquerading as httpd)
-
-**Run from:** the **Target itself** — log into it first.
+On the Runner:
 
 ```bash
-ssh user@<target_host>
-cd FAST
+sudo apt-get install -y sshpass   # only if missing
+./tests/acceptance/sim/simulate_brute_force.sh <TARGET_IP> nonexistent_bruteforce_test_user 8
+```
+
+The script counts only attempts that reached a verifiable authentication
+rejection. It sleeps between attempts to reduce OpenSSH per-source penalty
+interference.
+
+Expected Threat Hunting chain:
+
+```text
+5760    sshd: authentication failed
+100200  FAST SSH brute force ...            level 10
+```
+
+## 4. Port-scan test
+
+On the Runner:
+
+```bash
+./tests/acceptance/sim/simulate_port_scan.sh <TARGET_IP>
+```
+
+If root + nmap are available it uses a SYN scan; otherwise it uses TCP connect
+or `/dev/tcp` fallback against the reserved FAST ports.
+
+Expected Threat Hunting chain:
+
+```text
+100210  FAST port-scan probe observed ...   level 3
+100211  FAST possible port scan ...         level 7
+```
+
+Target-side confirmation:
+
+```bash
+sudo journalctl -k --since '2 minutes ago' | grep FAST_PORTSCAN
+```
+
+## 5. LOLBin test
+
+Run **on the Target itself**:
+
+```bash
+cd ~/fast-test
+git pull
 ./tests/acceptance/sim/simulate_lolbin.sh
 ```
 
-No arguments needed. The script cleans up after itself (removes the
-copied binary).
+The script copies `wget` to `/tmp/httpd`, executes it with wget-style arguments
+against loopback, waits for auditd to flush, and removes its temporary files.
+It does not need Internet access.
 
-> ⚠️ Running this from a different machine than the Target does
-> nothing useful — `auditd` only observes processes running on its
-> own host.
+Expected Threat Hunting chain:
 
-## 5. Confirming Detection (3 Ways)
-
-### A. Wazuh Dashboard (visual)
-Log into the Dashboard (`https://<Manager_IP>`) → **Security Events**
-→ filter by rule ID (`100200`, `100211`, or `100221`). The alert
-should appear within roughly a minute of running the simulation.
-
-### B. Command line (quick check, on the Manager)
-```bash
-docker exec single-node-wazuh.manager-1 tail -n 50 /var/ossec/logs/alerts/alerts.json | grep '"id":"100200"'
-```
-(swap the rule ID for the one you're checking)
-
-### C. Automated acceptance tests (recommended — does the waiting/checking for you)
-
-**Run from:** the Runner, with network access to both the Target and
-to the Manager's Docker socket (typically this means running pytest
-on the Manager machine itself, or a machine with a remote Docker
-context configured).
-
-```bash
-export TARGET_HOST=<target-ip>
-pytest tests/acceptance/ -v
+```text
+80792   Audit command
+100220  non-standard process presenting as httpd
+100221  LOLBin confirmed ...                level 12
 ```
 
-Each test: records the current point in `alerts.json` → runs the
-matching simulation script → polls for up to 60 seconds for the new
-alert → asserts it appeared at the expected severity level. Tests
-**skip** (not fail) if `TARGET_HOST` isn't set or the Manager isn't
-running, so this never breaks the regular `pytest tests/` unit suite.
+Target prerequisites can be checked directly:
 
-## 6. Troubleshooting
+```bash
+sudo systemctl is-active auditd
+sudo auditctl -l | grep audit-wazuh-c
+sudo grep -F '<location>/var/log/audit/audit.log</location>' /var/ossec/etc/ossec.conf
+```
 
-| Symptom | Likely cause | Fix |
-|---|---|---|
-| Brute-force alert never appears | Target's sshd isn't reachable, or the Agent isn't Active | Confirm `agent_control -l` shows Active; confirm port 22 is reachable from the Runner |
-| `sshpass: command not found` | Not installed on the Runner | `sudo apt-get install -y sshpass` |
-| Port-scan alert never appears | UFW logging not enabled on the Target | Re-run `sudo ./tests/acceptance/sim/setup_prereqs.sh` on the **Target** |
-| LOLBin alert never appears | `auditd` not installed/watching, or ran from the wrong machine | Confirm you're on the Target; re-run `setup_prereqs.sh`; check `sudo auditctl -l` shows the `execve` rule |
-| LOLBin: `audit.log` not collected | Agent's `ossec.conf` missing the audit `<localfile>` block | `setup_prereqs.sh` prints the exact block to add — add it and `sudo systemctl restart wazuh-agent` |
-| Acceptance tests all **skip** | `TARGET_HOST` not set, or Manager container not running | `export TARGET_HOST=...` and/or `./bin/fast status` to confirm the Manager is up |
+## 6. Automated acceptance suite
+
+Run from the Manager/repository checkout:
+
+```bash
+export TARGET_HOST=<TARGET_IP>
+export TARGET_SSH_USER=<TARGET_USER>
+pytest tests/acceptance -v
+```
+
+The suite only considers alerts written after each test starts. Missing
+`TARGET_HOST` or an unavailable Manager causes a skip instead of contaminating
+the normal offline unit suite.
+
+## Troubleshooting matrix
+
+| Symptom | Check |
+|---|---|
+| No SSH base alert | target `journalctl -u ssh`; agent Active; journald collection |
+| `5760` but no `100200` | deployed `local_rules.xml`; `wazuh-analysisd -t` |
+| No port-scan marker | rerun `setup_prereqs.sh`; inspect `iptables -t mangle -S PREROUTING` |
+| `100210` but no `100211` | confirm 8+ probes from same `srcip` inside 60 seconds |
+| LOLBin simulator preflight fails | auditd active; audit key; agent audit.log collection |
+| `80792` but no `100220` | inspect decoded `audit.command` and `audit.exe` |
+| `100220` but no `100221` | inspect EXECVE/raw audit arguments for URL / `-O` evidence |
+| Manager has alerts but Threat Hunting is empty | `./bin/fast status`; Filebeat → Indexer must be healthy |
+
+For rule design details, see `docs/runbook.md`.
