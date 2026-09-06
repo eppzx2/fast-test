@@ -121,3 +121,12 @@ def test_deploy_verifies_filebeat_to_indexer_tls_before_success():
     check_call = deploy.rindex("if ! wait_for_filebeat_indexer_healthy; then")
     success_banner = deploy.index("✅ DEPLOYMENT COMPLETE")
     assert check_call < success_banner
+
+
+def test_fast_status_requires_healthy_filebeat_indexer_pipeline():
+    fast = (ROOT / "bin" / "fast").read_text(encoding="utf-8")
+
+    assert "filebeat_indexer_health" in fast
+    assert "/usr/share/filebeat/bin/filebeat test output" in fast
+    assert "Filebeat -> Indexer alert pipeline" in fast
+    assert '&& [ "$fb_health" = "healthy" ]' in fast
