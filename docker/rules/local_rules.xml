@@ -43,22 +43,19 @@
 
 <!-- ============================================================
      SSH BRUTE FORCE
-     Base: Wazuh's authentication_failed group. We additionally require
-     the CURRENT event to have been decoded by the sshd decoder. Do not
-     use <match>sshd</match> here: the sshd program name is normally
-     consumed during pre-decoding and may not be present in the log body
-     that <match> evaluates. This was observed live with default rule
-     5760 firing while the old FAST 100200 rule never correlated.
-
-     Covers both invalid-user and wrong-password SSH failures as long as
-     the Wazuh sshd decoder classifies them into authentication_failed.
+     Wazuh v4.9 rule 5760 is the concrete failed-password SSH rule:
+       <if_sid>5700,5716</if_sid>
+       <match>Failed password|Failed keyboard|authentication error</match>
+     The live FAST target also confirms that each simulated password
+     failure lands on rule 5760. Correlate that exact rule instead of a
+     broad group + decoder condition; this mirrors Wazuh's own 5763
+     brute-force correlation while using FAST's 5/60s threshold.
      ============================================================ -->
 <group name="local,ssh_brute_force,">
   <rule id="100200" level="10" frequency="5" timeframe="60">
-    <if_matched_group>authentication_failed</if_matched_group>
-    <decoded_as>sshd</decoded_as>
+    <if_matched_sid>5760</if_matched_sid>
     <same_srcip />
-    <description>SSH brute force: 5 failed SSH authentication attempts from the same source IP ($(srcip)) within 60 seconds.</description>
+    <description>FAST SSH brute force: 5 failed password authentications from the same source IP ($(srcip)) within 60 seconds.</description>
     <mitre>
       <id>T1110</id>
     </mitre>
@@ -68,34 +65,25 @@
 
 <!-- ============================================================
      NMAP PORT SCAN
-     Base: default Wazuh rule 4100 "Firewall rules grouped" (the
-     "kernel" decoder parses srcip/dstip/dstport/protocol from
-     iptables/UFW log lines such as "[UFW BLOCK] ... SRC=... DPT=...").
-
-     NOTE ON NAMING: Wazuh's shipped ruleset does not include a
-     decoder literally named "connection_refused". The closest,
-     verified, existing mechanism for detecting refused/blocked
-     connection attempts is this kernel/firewall decoder chain
-     (rule 4100), which is what this rule builds on. If your
-     environment has a differently-named equivalent (e.g. a
-     firewalld decoder), point <if_sid> at that rule ID instead.
-
-     PREREQUISITE (target/agent host): firewall DROP/REJECT logging
-     must be enabled. setup_prereqs.sh creates explicit logged deny
-     rules for the deterministic FAST test ports and ensures journald
-     collection is present on the Wazuh agent.
+     setup_prereqs.sh installs a narrow iptables mangle/PREROUTING
+     LOG rule for only FAST's reserved test ports. Its prefix is
+     FAST_PORTSCAN. PREROUTING is deliberately used so probes are
+     logged before filter chains such as Tailscale/UFW can ACCEPT or
+     DROP them. The normal Wazuh kernel/firewall decoder still parses
+     SRC/DST/SPT/DPT and feeds rule 4100; FAST then keys specifically
+     on its own prefix, avoiding unrelated firewall noise.
      ============================================================ -->
 <group name="local,port_scan,">
   <rule id="100210" level="3">
     <if_sid>4100</if_sid>
-    <regex type="pcre2">BLOCK|REJECT|DROP</regex>
-    <description>Blocked/refused connection attempt (candidate port-scan event) from $(srcip) to port $(dstport)</description>
+    <match>FAST_PORTSCAN</match>
+    <description>FAST port-scan probe observed from $(srcip) to port $(dstport)</description>
     <group>port_scan,recon,</group>
   </rule>
   <rule id="100211" level="7" frequency="8" timeframe="60">
     <if_matched_sid>100210</if_matched_sid>
     <same_srcip />
-    <description>Possible port scan: 8+ blocked/refused connection attempts from the same source IP ($(srcip)) within 60 seconds.</description>
+    <description>FAST possible port scan: 8+ probes from the same source IP ($(srcip)) within 60 seconds.</description>
     <mitre>
       <id>T1046</id>
     </mitre>
