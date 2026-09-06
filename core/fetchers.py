@@ -12,6 +12,11 @@ import os
 from typing import Any, Dict, List
 
 import requests
+from dotenv import load_dotenv
+
+# The project root is mounted as /app in FAST's collector containers. load_dotenv
+# also works for local CLI use and never overwrites an explicitly exported value.
+load_dotenv()
 
 logger = logging.getLogger(__name__)
 
@@ -20,15 +25,10 @@ REQUEST_TIMEOUT = 20
 
 FEED_URLS = {
     "feodo": "https://feodotracker.abuse.ch/downloads/ipblocklist.json",
-    # Compatibility dump. When ABUSECH_AUTH_KEY is set, URLhaus uses its
-    # current authenticated export endpoint instead.
     "urlhaus_legacy": "https://urlhaus.abuse.ch/downloads/csv_recent/",
     "urlhaus_api": "https://urlhaus-api.abuse.ch/v2/files/exports/{auth_key}/recent.csv",
-    # MalwareBazaar's current Community API requires an Auth-Key. The legacy
-    # CSV URL is retained only as a best-effort compatibility fallback.
     "malwarebazaar_api": "https://mb-api.abuse.ch/api/v1/",
     "malwarebazaar_legacy": "https://bazaar.abuse.ch/export/csv/recent/",
-    # Spamhaus recommends the JSON DROP dataset; the old text file is legacy.
     "spamhaus": "https://www.spamhaus.org/drop/drop_v4.json",
 }
 
@@ -53,14 +53,12 @@ def _parse_commented_csv(text: str, default_fieldnames: List[str]) -> List[Dict[
         stripped = line.lstrip("# ").strip()
         if not stripped:
             continue
-        # Headers used by URLhaus/MalwareBazaar begin with id/first_seen.
         lowered = stripped.lower().lstrip('"')
         if lowered.startswith("id,") or lowered.startswith("first_seen"):
             header_line = stripped
             break
 
     if header_line:
-        # Use csv.reader rather than split(',') so quoted headers remain safe.
         fieldnames = [h.strip().strip('"') for h in next(csv.reader([header_line]))]
     else:
         fieldnames = default_fieldnames
@@ -125,15 +123,8 @@ def fetch_urlhaus() -> List[Dict[str, Any]]:
         result = _parse_commented_csv(
             response.text,
             [
-                "id",
-                "dateadded",
-                "url",
-                "url_status",
-                "last_online",
-                "threat",
-                "tags",
-                "urlhaus_link",
-                "reporter",
+                "id", "dateadded", "url", "url_status", "last_online",
+                "threat", "tags", "urlhaus_link", "reporter",
             ],
         )
         logger.info("URLhaus: %d records fetched", len(result))
@@ -175,31 +166,15 @@ def _fetch_malwarebazaar_legacy() -> List[Dict[str, Any]]:
     return _parse_commented_csv(
         response.text,
         [
-            "first_seen_utc",
-            "sha256_hash",
-            "md5_hash",
-            "sha1_hash",
-            "reporter",
-            "file_name",
-            "file_type_guess",
-            "mime_type",
-            "signature",
-            "clamav",
-            "vtpercent",
-            "imphash",
-            "ssdeep",
-            "tlsh",
+            "first_seen_utc", "sha256_hash", "md5_hash", "sha1_hash",
+            "reporter", "file_name", "file_type_guess", "mime_type",
+            "signature", "clamav", "vtpercent", "imphash", "ssdeep", "tlsh",
         ],
     )
 
 
 def fetch_malwarebazaar() -> List[Dict[str, Any]]:
-    """Fetch the latest MalwareBazaar samples.
-
-    Set ABUSECH_AUTH_KEY to use the supported Community API. Without a key,
-    FAST attempts the old CSV export for backward compatibility, but that
-    endpoint is not relied upon for correctness and may be unavailable.
-    """
+    """Fetch the latest MalwareBazaar samples using the supported API when keyed."""
     auth_key = _abusech_auth_key()
     try:
         if auth_key:
@@ -238,7 +213,6 @@ def fetch_spamhaus() -> List[Dict[str, Any]]:
                 logger.warning("Spamhaus: skipping malformed JSON line: %s", exc)
                 continue
             if not isinstance(item, dict) or not item.get("cidr"):
-                # The final metadata object contains timestamp/copyright but no CIDR.
                 continue
             result.append(
                 {
@@ -267,7 +241,7 @@ def fetch_all_feeds() -> Dict[str, List[Dict[str, Any]]]:
     for feed_name, fetch_func in fetch_functions.items():
         try:
             results[feed_name] = fetch_func()
-        except Exception as exc:  # final isolation boundary between providers
+        except Exception as exc:
             logger.exception("Unexpected failure in feed '%s': %s", feed_name, exc)
             results[feed_name] = []
 
