@@ -1,161 +1,137 @@
-# ============================================================
-# F.A.S.T. - Windows Wazuh Agent Automated Installation
-# ============================================================
-#
-# This script downloads and installs the Wazuh Agent on a Windows
-# host machine, configures it to connect to the Manager (cloud VM),
-# and starts the service.
-#
-# REQUIREMENT: Open PowerShell as Administrator, then run:
-#
-#   .\install-wazuh-agent.ps1 -ManagerIP "<IP>"
-#
-# ManagerIP - the IP of the cloud VM running the Wazuh Manager.
-# This can be the VM's public IP (found on the VM with
-# curl ifconfig.me) or, if you're using Tailscale, the VM's
-# Tailscale IP (found on the VM with tailscale ip -4).
-#
-# OPTIONAL: to give the agent a custom name:
-#   .\install-wazuh-agent.ps1 -ManagerIP "<IP>" -AgentName "agent-laptop"
-# ============================================================
+# F.A.S.T. - Windows Wazuh Agent installation helper
+# Run from an elevated PowerShell session.
 
 param(
     [Parameter(Mandatory=$true)]
+    [ValidateNotNullOrEmpty()]
     [string]$ManagerIP,
 
     [Parameter(Mandatory=$false)]
+    [ValidateNotNullOrEmpty()]
     [string]$AgentName = $env:COMPUTERNAME,
 
     [Parameter(Mandatory=$false)]
-    [string]$WazuhVersion = "4.9.0"
+    [ValidatePattern('^\d+\.\d+\.\d+$')]
+    [string]$WazuhVersion = "4.9.0",
+
+    [switch]$Force
 )
 
 $ErrorActionPreference = "Stop"
 
-function Write-Step($msg) {
+function Write-Step([string]$Message) {
     Write-Host ""
-    Write-Host "==> $msg" -ForegroundColor Cyan
+    Write-Host "==> $Message" -ForegroundColor Cyan
 }
-
-function Write-Success($msg) {
-    Write-Host "[OK] $msg" -ForegroundColor Green
-}
-
-function Write-Failure($msg) {
-    Write-Host "[ERROR] $msg" -ForegroundColor Red
-}
-
-# --- Administrator check ---
-$isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-if (-not $isAdmin) {
-    Write-Failure "This script requires Administrator privileges."
-    Write-Host "Right-click PowerShell and select 'Run as Administrator', then run the script again." -ForegroundColor Yellow
+function Write-Success([string]$Message) { Write-Host "[OK] $Message" -ForegroundColor Green }
+function Write-WarningMessage([string]$Message) { Write-Host "[!]  $Message" -ForegroundColor Yellow }
+function Fail([string]$Message) {
+    Write-Host "[ERROR] $Message" -ForegroundColor Red
     exit 1
 }
+
+$isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
+    [Security.Principal.WindowsBuiltInRole]::Administrator
+)
+if (-not $isAdmin) { Fail "Administrator privileges are required." }
 
 Write-Host "============================================================" -ForegroundColor Cyan
 Write-Host "  F.A.S.T. - Windows Wazuh Agent Installation" -ForegroundColor Cyan
 Write-Host "============================================================" -ForegroundColor Cyan
-Write-Host "Manager IP : $ManagerIP"
-Write-Host "Agent Name : $AgentName"
-Write-Host "Version    : $WazuhVersion"
+Write-Host "Manager: $ManagerIP"
+Write-Host "Agent:   $AgentName"
+Write-Host "Version: $WazuhVersion"
 
-# --- Check that the Manager IP is reachable (ports 1514/1515) ---
-Write-Step "Checking Manager reachability ($ManagerIP)..."
+Write-Step "Checking Manager reachability"
 $portsOk = $true
 foreach ($port in 1514, 1515) {
     $test = Test-NetConnection -ComputerName $ManagerIP -Port $port -WarningAction SilentlyContinue
     if ($test.TcpTestSucceeded) {
-        Write-Success "Port $port is reachable"
+        Write-Success "TCP $port reachable"
     } else {
-        Write-Failure "Port $port is not reachable"
+        Write-WarningMessage "TCP $port unreachable"
         $portsOk = $false
     }
 }
-
-if (-not $portsOk) {
-    Write-Host ""
-    Write-Host "WARNING: Some ports are not reachable. Possible reasons:" -ForegroundColor Yellow
-    Write-Host "  - The Manager (VM) hasn't fully started yet (deploy.sh isn't finished)"
-    Write-Host "  - The VM's firewall/security group rule is blocking ports 1514/1515"
-    Write-Host "  - If you're using Tailscale, both sides (this machine and the VM) aren't connected"
-    Write-Host ""
-    $continue = Read-Host "Do you want to continue anyway? (y/n)"
-    if ($continue -ne "y" -and $continue -ne "Y") {
-        Write-Host "Stopped."
-        exit 1
-    }
+if (-not $portsOk -and -not $Force) {
+    $answer = Read-Host "Continue anyway? (y/N)"
+    if ($answer -notmatch '^[Yy]$') { exit 1 }
 }
 
-# --- Check for an existing installation ---
 $existingService = Get-Service -Name "WazuhSvc" -ErrorAction SilentlyContinue
-if ($existingService) {
-    Write-Step "Existing Wazuh Agent found, stopping it..."
-    Stop-Service -Name "WazuhSvc" -Force -ErrorAction SilentlyContinue
+$hadExistingService = $null -ne $existingService
+if ($hadExistingService -and $existingService.Status -eq 'Running') {
+    Write-Step "Stopping existing Wazuh Agent for upgrade/reinstall"
+    Stop-Service -Name "WazuhSvc" -Force
 }
 
-# --- Download the MSI ---
-Write-Step "Downloading Wazuh Agent MSI (v$WazuhVersion)..."
 $msiUrl = "https://packages.wazuh.com/4.x/windows/wazuh-agent-$WazuhVersion-1.msi"
-$msiPath = "$env:TEMP\wazuh-agent.msi"
+$msiPath = Join-Path $env:TEMP "wazuh-agent-$WazuhVersion.msi"
+$installSucceeded = $false
+$rebootRequired = $false
 
 try {
+    Write-Step "Downloading Wazuh Agent MSI"
     Invoke-WebRequest -Uri $msiUrl -OutFile $msiPath -UseBasicParsing
-    Write-Success "MSI downloaded: $msiPath"
-} catch {
-    Write-Failure "Failed to download the MSI: $_"
-    Write-Host "Check the URL manually: $msiUrl" -ForegroundColor Yellow
-    exit 1
-}
-
-# --- Install ---
-Write-Step "Installing Wazuh Agent..."
-$installArgs = "/i `"$msiPath`" /q WAZUH_MANAGER=`"$ManagerIP`" WAZUH_REGISTRATION_SERVER=`"$ManagerIP`" WAZUH_AGENT_NAME=`"$AgentName`""
-
-$process = Start-Process -FilePath "msiexec.exe" -ArgumentList $installArgs -Wait -PassThru -NoNewWindow
-
-if ($process.ExitCode -ne 0) {
-    Write-Failure "Installation failed (exit code: $($process.ExitCode))"
-    exit 1
-}
-Write-Success "Wazuh Agent installed"
-
-# --- Start the service ---
-Write-Step "Starting the Wazuh Agent service..."
-try {
-    Start-Service -Name "WazuhSvc"
-    Start-Sleep -Seconds 5
-    $service = Get-Service -Name "WazuhSvc"
-    if ($service.Status -eq "Running") {
-        Write-Success "Service is running (Status: $($service.Status))"
-    } else {
-        Write-Failure "Service failed to start (Status: $($service.Status))"
+    if (-not (Test-Path $msiPath) -or (Get-Item $msiPath).Length -le 0) {
+        throw "Downloaded MSI is missing or empty"
     }
+    Write-Success "MSI downloaded"
+
+    Write-Step "Installing Wazuh Agent"
+    $installArgs = "/i `"$msiPath`" /q WAZUH_MANAGER=`"$ManagerIP`" WAZUH_REGISTRATION_SERVER=`"$ManagerIP`" WAZUH_AGENT_NAME=`"$AgentName`""
+    $process = Start-Process -FilePath "msiexec.exe" -ArgumentList $installArgs -Wait -PassThru -NoNewWindow
+
+    # MSI 3010 = successful install with reboot required.
+    if ($process.ExitCode -notin 0, 3010) {
+        throw "Installation failed (MSI exit code $($process.ExitCode))"
+    }
+    $installSucceeded = $true
+    $rebootRequired = $process.ExitCode -eq 3010
+    Write-Success "Wazuh Agent installed"
 } catch {
-    Write-Failure "Failed to start the service: $_"
-    exit 1
+    if ($hadExistingService) {
+        try { Start-Service -Name "WazuhSvc" -ErrorAction SilentlyContinue } catch { }
+    }
+    Fail $_.Exception.Message
+} finally {
+    Remove-Item -Path $msiPath -Force -ErrorAction SilentlyContinue
 }
 
-# --- Show the latest log entries (to check connection status) ---
-Write-Step "Latest log entries (waiting 10 seconds)..."
-Start-Sleep -Seconds 10
+if (-not $installSucceeded) { Fail "Installation did not complete" }
+
+Write-Step "Starting Wazuh Agent service"
+$service = Get-Service -Name "WazuhSvc" -ErrorAction SilentlyContinue
+if (-not $service) { Fail "WazuhSvc was not created by the installer" }
+if ($service.Status -eq 'Running') {
+    Restart-Service -Name "WazuhSvc" -Force
+} else {
+    Start-Service -Name "WazuhSvc"
+}
+Start-Sleep -Seconds 5
+$service = Get-Service -Name "WazuhSvc"
+if ($service.Status -ne 'Running') { Fail "WazuhSvc did not become Running" }
+Write-Success "WazuhSvc is running"
+
+Write-Step "Checking recent agent logs"
+Start-Sleep -Seconds 5
 $logPath = "C:\Program Files (x86)\ossec-agent\ossec.log"
 if (Test-Path $logPath) {
-    Get-Content -Path $logPath -Tail 10
+    $recent = Get-Content -Path $logPath -Tail 80
+    $recent | Select-String -Pattern 'Connected to the server|Requesting a key|ERROR|WARNING' | Select-Object -Last 12
+    if ($recent -match 'Connected to the server') {
+        Write-Success "Agent reports a Manager connection"
+    } else {
+        Write-WarningMessage "Service is running but a confirmed Manager connection was not found in recent logs yet"
+    }
 } else {
-    Write-Host "Log file not found: $logPath" -ForegroundColor Yellow
+    Write-WarningMessage "Agent log not found yet: $logPath"
+}
+
+if ($rebootRequired) {
+    Write-WarningMessage "Windows Installer reported success with reboot required (3010). Reboot when practical."
 }
 
 Write-Host ""
-Write-Host "============================================================" -ForegroundColor Cyan
-Write-Host "  DONE" -ForegroundColor Cyan
-Write-Host "============================================================" -ForegroundColor Cyan
-Write-Host ""
-Write-Host "Confirm the connection on the Manager side (on the VM):"
+Write-Host "DONE. Verify on Manager:" -ForegroundColor Cyan
 Write-Host "  docker exec single-node-wazuh.manager-1 /var/ossec/bin/agent_control -l"
-Write-Host ""
-Write-Host "Or in the Dashboard: Agents section -> search for '$AgentName'"
-Write-Host ""
-Write-Host "If you see 'SSL error, Connection refused':"
-Write-Host "  - Check that the Manager (VM) started up healthy"
-Write-Host "  - See docs/DEPLOYMENT_GUIDE.md -> 'Troubleshooting' section"
