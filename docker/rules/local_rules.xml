@@ -54,7 +54,7 @@
 <group name="local,ssh_brute_force,">
   <rule id="100200" level="10" frequency="5" timeframe="60">
     <if_matched_sid>5760</if_matched_sid>
-    <same_srcip />
+    <same_source_ip />
     <description>FAST SSH brute force: 5 failed password authentications from the same source IP ($(srcip)) within 60 seconds.</description>
     <mitre>
       <id>T1110</id>
@@ -82,7 +82,7 @@
   </rule>
   <rule id="100211" level="7" frequency="8" timeframe="60">
     <if_matched_sid>100210</if_matched_sid>
-    <same_srcip />
+    <same_source_ip />
     <description>FAST possible port scan: 8+ probes from the same source IP ($(srcip)) within 60 seconds.</description>
     <mitre>
       <id>T1046</id>
