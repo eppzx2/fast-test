@@ -1,25 +1,36 @@
 """Tests for FAST threat-intelligence feed fetchers."""
 
 import json
+import os
 from unittest.mock import MagicMock, patch
 
+import pytest
 import requests
 
 from core import fetchers
 
+live_feed = pytest.mark.skipif(
+    os.getenv("FAST_LIVE_FEEDS") != "1",
+    reason="set FAST_LIVE_FEEDS=1 to exercise external providers",
+)
 
+
+@live_feed
 def test_fetch_feodo_returns_list():
     assert isinstance(fetchers.fetch_feodo(), list)
 
 
+@live_feed
 def test_fetch_urlhaus_returns_list():
     assert isinstance(fetchers.fetch_urlhaus(), list)
 
 
+@live_feed
 def test_fetch_malwarebazaar_returns_list():
     assert isinstance(fetchers.fetch_malwarebazaar(), list)
 
 
+@live_feed
 def test_fetch_spamhaus_returns_list():
     result = fetchers.fetch_spamhaus()
     assert isinstance(result, list)
@@ -28,6 +39,7 @@ def test_fetch_spamhaus_returns_list():
         assert "cidr" in item
 
 
+@live_feed
 def test_fetch_all_feeds_returns_all_names():
     result = fetchers.fetch_all_feeds()
     assert set(result) == {"feodo", "urlhaus", "malwarebazaar", "spamhaus"}
