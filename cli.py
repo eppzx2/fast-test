@@ -1,185 +1,142 @@
-"""
-CLI (Command Line Interface)
-
-Terminal vasitəsilə TALON IOC Collector-dan istifadə.
-
-Istifadə:
-    python cli.py --init-db        # Verilənlər bazasını yarat
-    python cli.py --fetch          # Bütün feed-lərdən yığ, normallaşdır, bazaya yaz
-    python cli.py --export csv     # CSV olaraq export et
-    python cli.py --export json    # JSON olaraq export et
-    python cli.py --export both    # Həm CSV, həm JSON export et
-    python cli.py --show           # Bazada olan IOC-ları göstər
-    python cli.py --count          # IOC sayını göstər
-"""
+"""Command-line interface for the FAST IOC collector."""
 
 import argparse
 import logging
-from core import fetchers, normalizer, db, scoring, exporter, wazuh_export
+import os
+from typing import Optional, Sequence
 
-# Logging konfiqurasiyası
+from core import db, exporter, fetchers, normalizer, wazuh_export
+
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
 logger = logging.getLogger(__name__)
 
 
-def run_init_db() -> None:
-    """
-    Verilənlər bazasını yaradır (mövcud deyilsə).
-    
-    Returns:
-        None
-    """
+def run_init_db() -> bool:
     db.init_database()
     print("✓ Verilənlər bazası hazırdır.")
+    return True
 
 
-def run_fetch() -> None:
-    """
-    Bütün feed-lərdən IOC yığır, normallaşdırır və bazaya yazır.
-    
-    Axın: fetch_all_feeds() -> normalize_all() -> insert_batch()
-    (Dedup və confidence scoring db.insert_ioc() daxilində avtomatik baş verir.)
-    
-    Returns:
-        None
-    """
+def run_fetch() -> bool:
+    """Fetch/normalize/store feeds and fail if every provider returned zero data."""
     db.init_database()
-    
     print("📡 Feed-lərdən məlumat çəkilir...")
     raw_feeds = fetchers.fetch_all_feeds()
-    
+    raw_total = 0
     for feed_name, iocs in raw_feeds.items():
+        raw_total += len(iocs)
         print(f"  • {feed_name}: {len(iocs)} xam qeyd")
-    
+
+    if raw_total == 0:
+        print("✗ Heç bir feed məlumat qaytarmadı; köhnə IOC datası üzərinə uğurlu refresh kimi yazılmayacaq.")
+        return False
+
     print("\n🔄 Normallaşdırılır...")
     normalized = normalizer.normalize_all(raw_feeds)
     print(f"  • Cəmi {len(normalized)} IOC normallaşdırıldı")
-    
+    if not normalized:
+        print("✗ Feed məlumatı gəldi, amma heç bir IOC normallaşdırıla bilmədi.")
+        return False
+
     print("\n💾 Bazaya yazılır (dedup + scoring avtomatik)...")
-    count = db.insert_batch(normalized)
-    print(f"  • {count} IOC emal edildi")
-    
-    total_in_db = db.get_count()
-    print(f"\n✓ Tamamlandı. Bazadakı cəmi unikal IOC sayı: {total_in_db}")
+    processed = db.insert_batch(normalized)
+    print(f"  • {processed} IOC emal edildi")
+    if processed == 0:
+        print("✗ Heç bir normallaşdırılmış IOC bazaya yazıla bilmədi.")
+        return False
+
+    print(f"\n✓ Tamamlandı. Bazadakı unikal IOC sayı: {db.get_count()}")
+    return True
 
 
-def run_export(fmt: str) -> None:
-    """
-    Bazadakı bütün IOC-ları göstərilən formatda export edir.
-    
-    Args:
-        fmt (str): 'csv', 'json', və ya 'both'
-        
-    Returns:
-        None
-    """
+def run_export(fmt: str) -> bool:
     iocs = db.get_all_iocs()
-    
     if not iocs:
-        print("⚠️ Bazada IOC yoxdur. Əvvəlcə --fetch işə sal.")
-        return
-    
+        print("✗ Bazada IOC yoxdur. Əvvəlcə --fetch işə sal.")
+        return False
+
     if fmt == "csv":
         ok = exporter.export_to_csv(iocs)
         print(f"{'✓' if ok else '✗'} CSV export: sample_output/ioc_export.csv ({len(iocs)} IOC)")
-    elif fmt == "json":
+        return ok
+    if fmt == "json":
         ok = exporter.export_to_json(iocs)
         print(f"{'✓' if ok else '✗'} JSON export: sample_output/ioc_export.json ({len(iocs)} IOC)")
-    elif fmt == "both":
+        return ok
+    if fmt == "both":
         ok = exporter.export_both(iocs)
         print(f"{'✓' if ok else '✗'} CSV+JSON export: sample_output/ ({len(iocs)} IOC)")
-    elif fmt == "wazuh":
+        return ok
+    if fmt == "wazuh":
         stats = wazuh_export.get_export_stats(iocs)
         ok = wazuh_export.export_to_cdb_list(iocs)
+        path = os.path.join("sample_output", wazuh_export.DEFAULT_CDB_FILENAME)
+        usable = ok and stats["exported"] > 0 and os.path.isfile(path) and os.path.getsize(path) > 0
         print(
-            f"{'✓' if ok else '✗'} Wazuh CDB list export: sample_output/ioc-ips "
-            f"({stats['exported']}/{stats['ip_type']} 'ip' tipli IOC, "
-            f"cəmi {stats['total']} IOC-dan)"
+            f"{'✓' if usable else '✗'} Wazuh CDB list export: {path} "
+            f"({stats['exported']}/{stats['ip_type']} etibarlı IPv4/CIDR, cəmi {stats['total']} IOC-dan)"
         )
-    else:
-        print(f"✗ Naməlum format: '{fmt}'. 'csv', 'json', 'both' və ya 'wazuh' istifadə et.")
+        if ok and not usable:
+            print("✗ Wazuh CDB siyahısı boşdur; Manager-ə boş threat list göndərilməyəcək.")
+        return usable
+
+    print(f"✗ Naməlum format: {fmt!r}")
+    return False
 
 
-def run_show() -> None:
-    """
-    Bazadakı bütün IOC-ları terminalda cədvəl şəklində göstərir.
-    
-    Returns:
-        None
-    """
+def run_show() -> bool:
     iocs = db.get_all_iocs()
-    
     if not iocs:
-        print("⚠️ Bazada IOC yoxdur. Əvvəlcə --fetch işə sal.")
-        return
-    
+        print("⚠️ Bazada IOC yoxdur.")
+        return True
     print(f"\n{'IOC Value':<45} {'Type':<8} {'Feed':<25} {'Score':<6} {'Last Seen'}")
     print("-" * 110)
-    
     for ioc in iocs:
-        value = str(ioc.get("ioc_value", ""))[:43]
         print(
-            f"{value:<45} "
+            f"{str(ioc.get('ioc_value', ''))[:43]:<45} "
             f"{ioc.get('ioc_type', ''):<8} "
             f"{str(ioc.get('source_feed', ''))[:23]:<25} "
             f"{ioc.get('confidence_score', 0):<6} "
             f"{ioc.get('last_seen', '')}"
         )
-    
     print(f"\nCəmi: {len(iocs)} IOC")
+    return True
 
 
-def run_count() -> None:
-    """
-    Bazadakı toplam IOC sayını göstərir.
-    
-    Returns:
-        None
-    """
-    count = db.get_count()
-    print(f"Bazadakı toplam IOC sayı: {count}")
+def run_count() -> bool:
+    print(f"Bazadakı toplam IOC sayı: {db.get_count()}")
+    return True
 
 
-def main():
-    """
-    CLI əsas funksiyası.
-    
-    Command line arqumentlərini parse edib müvafiq funksiyaları çağırır.
-    Heç bir arqument verilmədikdə köməkçi mesaj göstərir.
-    """
-    parser = argparse.ArgumentParser(
-        description="TALON IOC Collector - Terminal İnterfeysi"
-    )
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    parser = argparse.ArgumentParser(description="FAST IOC Collector")
     parser.add_argument("--init-db", action="store_true", help="Verilənlər bazasını yarat")
     parser.add_argument("--fetch", action="store_true", help="Bütün feed-lərdən yığ")
     parser.add_argument("--export", choices=["csv", "json", "both", "wazuh"], help="Export formatı")
     parser.add_argument("--show", action="store_true", help="IOC-ları göstər")
     parser.add_argument("--count", action="store_true", help="IOC sayını göstər")
-    
-    args = parser.parse_args()
-    
+    args = parser.parse_args(argv)
+
     if not any([args.init_db, args.fetch, args.export, args.show, args.count]):
         parser.print_help()
-        return
-    
+        return 0
+
+    ok = True
     if args.init_db:
-        run_init_db()
-    
+        ok = run_init_db() and ok
     if args.fetch:
-        run_fetch()
-    
+        ok = run_fetch() and ok
     if args.export:
-        run_export(args.export)
-    
+        ok = run_export(args.export) and ok
     if args.show:
-        run_show()
-    
+        ok = run_show() and ok
     if args.count:
-        run_count()
+        ok = run_count() and ok
+    return 0 if ok else 1
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
