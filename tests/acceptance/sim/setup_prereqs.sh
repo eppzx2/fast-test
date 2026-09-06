@@ -8,7 +8,7 @@
 #
 # It prepares three things the target needs to be attackable/exercisable:
 #   1. OpenSSH server for brute-force simulation
-#   2. UFW logged deny rules + Wazuh journald collection for port scan
+#   2. Deterministic kernel logging for FAST port-scan test ports
 #   3. auditd execve watch for the later LOLBin simulation
 #
 # Idempotent: safe to run more than once.
@@ -24,6 +24,8 @@ fi
 OSSEC_CONF="/var/ossec/etc/ossec.conf"
 AGENT_CONFIG_CHANGED=false
 PORTS=(56001 56002 56003 56004 56005 56006 56007 56008 56009 56010 56011 56012)
+PORTS_CSV=$(IFS=,; echo "${PORTS[*]}")
+FAST_SCAN_PREFIX="FAST_PORTSCAN "
 
 ensure_journald_collection() {
     if [ ! -f "$OSSEC_CONF" ]; then
@@ -48,7 +50,7 @@ pos = text.find(closing)
 if pos < 0:
     raise SystemExit("No </ossec_config> found in Wazuh agent config")
 block = """
-  <!-- FAST acceptance tests: collect systemd journal (sshd/UFW kernel logs) -->
+  <!-- FAST acceptance tests: collect systemd journal (sshd/kernel logs) -->
   <localfile>
     <log_format>journald</log_format>
     <location>journald</location>
@@ -61,6 +63,32 @@ PY
     echo "[OK] Added journald collection to Wazuh agent config"
 }
 
+ensure_fast_portscan_logging() {
+    if ! command -v iptables >/dev/null 2>&1; then
+        apt-get update -qq
+        apt-get install -y iptables
+    fi
+
+    # Tailscale can ACCEPT traffic before UFW's filter rules, which means a
+    # scan of a Tailscale 100.x address may never produce a UFW BLOCK record.
+    # Log only FAST's reserved test ports in mangle/PREROUTING, before those
+    # filter decisions. LOG is non-terminating: it observes packets and does
+    # not itself accept/drop traffic or change the target's security policy.
+    local rule=(
+        -p tcp --syn
+        -m multiport --dports "$PORTS_CSV"
+        -m limit --limit 30/second --limit-burst 60
+        -j LOG --log-prefix "$FAST_SCAN_PREFIX" --log-level 6
+    )
+
+    if iptables -t mangle -C PREROUTING "${rule[@]}" 2>/dev/null; then
+        echo "[OK] FAST pre-filter port-scan logging rule already present"
+    else
+        iptables -t mangle -I PREROUTING 1 "${rule[@]}"
+        echo "[OK] Added FAST pre-filter port-scan logging rule"
+    fi
+}
+
 echo "==> [1/3] Installing and enabling OpenSSH server..."
 if ! systemctl list-unit-files 2>/dev/null | grep -qE '^(ssh|sshd)\.service'; then
     apt-get update -qq
@@ -71,14 +99,15 @@ systemctl is-active --quiet ssh 2>/dev/null || systemctl is-active --quiet sshd
 echo "[OK] sshd is installed and running"
 
 echo ""
-echo "==> [2/3] Preparing deterministic UFW port-scan logging..."
+echo "==> [2/3] Preparing deterministic port-scan logging..."
+ensure_fast_portscan_logging
+
+# Keep explicit UFW deny+log rules as a secondary signal for non-Tailscale
+# paths, but FAST detection no longer depends on UFW seeing the packet.
 if ! command -v ufw >/dev/null 2>&1; then
     apt-get update -qq
     apt-get install -y ufw
 fi
-
-# Do not rely on arbitrary closed ports or on the default policy. These ports
-# are reserved for FAST acceptance tests and are explicitly denied+logged.
 ufw allow OpenSSH >/dev/null 2>&1 || true
 ufw logging medium >/dev/null
 for port in "${PORTS[@]}"; do
@@ -119,4 +148,5 @@ echo "[OK] auditd installed and watching execve syscalls (key=audit-wazuh-c)"
 echo ""
 echo "Prerequisites setup complete."
 echo "Port-scan test ports: ${PORTS[*]}"
+echo "Kernel marker expected during scan: FAST_PORTSCAN"
 echo "Run simulations from the attacking host after pulling the latest FAST code."
