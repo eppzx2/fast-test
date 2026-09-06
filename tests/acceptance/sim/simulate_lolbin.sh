@@ -4,19 +4,13 @@
 # 100220 -> 100221)
 # ============================================================
 # Copies the wget binary to /tmp/httpd (so the process name/comm
-# becomes "httpd") and executes it with wget-style arguments
-# against a harmless local URL, to trigger the LOLBin masquerading
-# detection.
+# becomes "httpd") and executes it with wget-style arguments.
 #
 # IMPORTANT: this script must run ON THE TARGET HOST itself (the
-# machine whose Wazuh Agent + auditd are being tested), not remotely -
-# auditd only sees local process execution.
+# machine whose Wazuh Agent + auditd are being tested).
 #
-# REQUIREMENT: auditd must be installed and watching execve on this
-# host - see setup_prereqs.sh.
-#
-# USAGE (on the target host):
-#   ./simulate_lolbin.sh
+# REQUIREMENT: run setup_prereqs.sh first so auditd watches execve
+# and the Wazuh agent collects /var/log/audit/audit.log.
 # ============================================================
 
 set -Eeuo pipefail
@@ -27,19 +21,36 @@ if [ -z "$WGET_BIN" ]; then
     exit 1
 fi
 
+if ! systemctl is-active --quiet auditd 2>/dev/null; then
+    echo "ERROR: auditd is not running. Run setup_prereqs.sh on this target first." >&2
+    exit 1
+fi
+
+if [ ! -f /var/ossec/etc/ossec.conf ] || \
+   ! grep -Fq '<location>/var/log/audit/audit.log</location>' /var/ossec/etc/ossec.conf; then
+    echo "ERROR: Wazuh agent is not configured to collect /var/log/audit/audit.log." >&2
+    echo "Run setup_prereqs.sh on this target first." >&2
+    exit 1
+fi
+
 FAKE_HTTPD="/tmp/httpd"
+OUTPUT_FILE="/tmp/httpd_sim_output.tmp"
+trap 'rm -f "$OUTPUT_FILE" "$FAKE_HTTPD"' EXIT
 
 echo "==> Copying $WGET_BIN to $FAKE_HTTPD (masquerading as httpd)"
 cp "$WGET_BIN" "$FAKE_HTTPD"
 chmod +x "$FAKE_HTTPD"
 
 echo "==> Executing $FAKE_HTTPD with wget-style arguments"
-# A harmless, always-resolvable target; -T sets a short timeout so
-# this does not hang if outbound network is restricted. We don't
-# care whether the request itself succeeds - only that the process
-# executes and auditd captures the EXECVE event.
-"$FAKE_HTTPD" -T 3 -t 1 -O /tmp/httpd_sim_output.tmp "http://example.com/" >/dev/null 2>&1 || true
+# Use loopback instead of an Internet dependency. Port 9 is normally closed;
+# connection success is irrelevant because auditd records execve before wget
+# attempts the network connection. The URL and -O argument give rule 100221
+# deterministic wget-style command-line evidence.
+"$FAKE_HTTPD" -T 2 -t 1 -O "$OUTPUT_FILE" \
+    "http://127.0.0.1:9/fast-lolbin-test" >/dev/null 2>&1 || true
 
-rm -f /tmp/httpd_sim_output.tmp "$FAKE_HTTPD"
+# Give auditd/logcollector a moment to flush the execution record.
+sleep 1
 
-echo "[OK] Simulated masquerading process executed. Rules 100220/100221 should fire within 60s."
+echo "[OK] Masquerading process executed locally."
+echo "Expected Wazuh chain: 80792 -> 100220 -> 100221."
