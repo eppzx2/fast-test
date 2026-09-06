@@ -57,16 +57,28 @@ def test_frequency_context_rules_use_if_matched():
             )
 
 
-def test_ssh_bruteforce_rule_filters_on_decoder_not_program_text():
+def test_ssh_bruteforce_rule_correlates_wazuh_5760():
+    """Live v4.9 target failures are classified by Wazuh rule 5760."""
     rules_by_id = {rule.attrib["id"]: rule for rule in _rules()}
     rule = rules_by_id["100200"]
 
-    assert rule.findtext("if_matched_group") == "authentication_failed"
-    assert rule.findtext("decoded_as") == "sshd"
+    assert rule.findtext("if_matched_sid") == "5760"
     assert rule.find("same_srcip") is not None
-    assert rule.find("match") is None, (
-        "Rule 100200 must not look for the sshd program name in the raw log body"
-    )
+    assert rule.attrib["frequency"] == "5"
+    assert rule.attrib["timeframe"] == "60"
+    assert rule.find("if_matched_group") is None
+    assert rule.find("decoded_as") is None
+
+
+def test_portscan_rule_uses_deterministic_fast_kernel_marker():
+    rules_by_id = {rule.attrib["id"]: rule for rule in _rules()}
+    base = rules_by_id["100210"]
+    correlation = rules_by_id["100211"]
+
+    assert base.findtext("if_sid") == "4100"
+    assert base.findtext("match") == "FAST_PORTSCAN"
+    assert correlation.findtext("if_matched_sid") == "100210"
+    assert correlation.find("same_srcip") is not None
 
 
 def test_lolbin_confirmation_is_same_event_child():
@@ -146,7 +158,7 @@ def test_bruteforce_simulation_does_not_hide_transport_failures():
     assert "2>/dev/null || true" not in script
 
 
-def test_port_scan_simulation_is_non_root_safe_and_deterministic():
+def test_port_scan_simulation_is_non_root_safe_and_prefilter_logged():
     script = (ROOT / "tests" / "acceptance" / "sim" / "simulate_port_scan.sh").read_text(encoding="utf-8")
     setup = (ROOT / "tests" / "acceptance" / "sim" / "setup_prereqs.sh").read_text(encoding="utf-8")
 
@@ -160,6 +172,12 @@ def test_port_scan_simulation_is_non_root_safe_and_deterministic():
         assert port in script
         assert port in setup
 
+    # UFW remains a secondary deny/log signal, but the deterministic FAST
+    # marker is inserted before filter chains so Tailscale cannot bypass it.
     assert 'ufw deny log "${port}/tcp"' in setup
     assert "ufw logging medium" in setup
     assert '<location>journald</location>' in setup
+    assert 'iptables -t mangle -C PREROUTING' in setup
+    assert 'iptables -t mangle -I PREROUTING 1' in setup
+    assert 'FAST_SCAN_PREFIX="FAST_PORTSCAN "' in setup
+    assert '--dports "$PORTS_CSV"' in setup
