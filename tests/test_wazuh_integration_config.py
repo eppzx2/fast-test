@@ -13,9 +13,6 @@ RULES_PATH = ROOT / "docker" / "rules" / "local_rules.xml"
 
 
 def _rules():
-    # Wazuh rule files may contain multiple top-level <group> elements.
-    # Wrap them in a synthetic root so Python's XML parser can validate
-    # the XML structure without changing the file Wazuh consumes.
     text = RULES_PATH.read_text(encoding="utf-8")
     root = ET.fromstring(f"<fast_rules>{text}</fast_rules>")
     return root.findall(".//rule")
@@ -27,12 +24,6 @@ def test_custom_rule_ids_are_unique():
 
 
 def test_frequency_context_rules_use_if_matched():
-    """Wazuh frequency/timeframe context requires if_matched_*.
-
-    Conversely, if_matched_sid/if_matched_group are time-window correlation
-    primitives and must carry both frequency and timeframe. Same-event
-    parent/child chaining must use if_sid/if_group instead.
-    """
     for rule in _rules():
         has_if_matched = (
             rule.find("if_matched_sid") is not None
@@ -43,8 +34,7 @@ def test_frequency_context_rules_use_if_matched():
 
         if has_if_matched:
             assert has_frequency and has_timeframe, (
-                f"Rule {rule.attrib['id']} uses if_matched_* without "
-                "frequency/timeframe"
+                f"Rule {rule.attrib['id']} uses if_matched_* without frequency/timeframe"
             )
 
         if has_frequency or has_timeframe:
@@ -52,13 +42,11 @@ def test_frequency_context_rules_use_if_matched():
                 f"Rule {rule.attrib['id']} must define both frequency and timeframe"
             )
             assert has_if_matched, (
-                f"Rule {rule.attrib['id']} uses frequency/timeframe without "
-                "if_matched_sid/if_matched_group"
+                f"Rule {rule.attrib['id']} uses frequency/timeframe without if_matched_*"
             )
 
 
 def test_ssh_bruteforce_rule_correlates_wazuh_5760():
-    """Live v4.9 target failures are classified by Wazuh rule 5760."""
     rules_by_id = {rule.attrib["id"]: rule for rule in _rules()}
     rule = rules_by_id["100200"]
 
@@ -103,13 +91,9 @@ def test_cdb_list_is_registered_and_validated_during_deploy():
 def test_manager_log_health_is_scoped_to_current_container_start():
     for relative_path in ("deploy.sh", "bin/fast", "refresh_iocs.sh"):
         text = (ROOT / relative_path).read_text(encoding="utf-8")
-
         assert ".State.StartedAt" in text, relative_path
         assert 'docker logs --since "$started_at" "$MANAGER_CONTAINER"' in text, relative_path
-        assert (
-            'docker logs "$MANAGER_CONTAINER" 2>&1 | grep -c "CRITICAL"'
-            not in text
-        ), relative_path
+        assert 'docker logs "$MANAGER_CONTAINER" 2>&1 | grep -c "CRITICAL"' not in text
 
 
 def test_deploy_rejects_stale_or_mixed_wazuh_certificate_bundles():
@@ -134,7 +118,6 @@ def test_deploy_verifies_filebeat_to_indexer_tls_before_success():
     assert "wait_for_filebeat_indexer_healthy" in deploy
     assert "/usr/share/filebeat/bin/filebeat test output" in deploy
     assert "Filebeat → Indexer" in deploy
-
     check_call = deploy.rindex("if ! wait_for_filebeat_indexer_healthy; then")
     success_banner = deploy.index("✅ DEPLOYMENT COMPLETE")
     assert check_call < success_banner
@@ -164,7 +147,7 @@ def test_port_scan_simulation_is_non_root_safe_and_prefilter_logged():
 
     assert 'SCAN_TYPE="-sS"' in script
     assert 'SCAN_TYPE="-sT"' in script
-    assert "nmap $SCAN_TYPE" not in script  # quoted variable must be used
+    assert "nmap $SCAN_TYPE" not in script
     assert "nmap failed" in script
     assert "|| true" not in script.split("if command -v nmap", 1)[1].split("else", 1)[0]
 
@@ -172,12 +155,15 @@ def test_port_scan_simulation_is_non_root_safe_and_prefilter_logged():
         assert port in script
         assert port in setup
 
-    # UFW remains a secondary deny/log signal, but the deterministic FAST
-    # marker is inserted before filter chains so Tailscale cannot bypass it.
-    assert 'ufw deny log "${port}/tcp"' in setup
-    assert "ufw logging medium" in setup
     assert '<location>journald</location>' in setup
     assert 'iptables -t mangle -C PREROUTING' in setup
     assert 'iptables -t mangle -I PREROUTING 1' in setup
     assert 'FAST_SCAN_PREFIX="FAST_PORTSCAN "' in setup
     assert '--dports "$PORTS_CSV"' in setup
+
+    # The setup must remain observational: it may LOG test traffic, but it must
+    # not enable UFW or install ACCEPT/DROP rules as a side effect.
+    assert "ufw enable" not in setup
+    assert "ufw deny" not in setup
+    assert "-j ACCEPT" not in setup
+    assert "-j DROP" not in setup
