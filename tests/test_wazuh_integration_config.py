@@ -57,6 +57,18 @@ def test_frequency_context_rules_use_if_matched():
             )
 
 
+def test_ssh_bruteforce_rule_filters_on_decoder_not_program_text():
+    rules_by_id = {rule.attrib["id"]: rule for rule in _rules()}
+    rule = rules_by_id["100200"]
+
+    assert rule.findtext("if_matched_group") == "authentication_failed"
+    assert rule.findtext("decoded_as") == "sshd"
+    assert rule.find("same_srcip") is not None
+    assert rule.find("match") is None, (
+        "Rule 100200 must not look for the sshd program name in the raw log body"
+    )
+
+
 def test_lolbin_confirmation_is_same_event_child():
     rules_by_id = {rule.attrib["id"]: rule for rule in _rules()}
     rule = rules_by_id["100221"]
@@ -91,18 +103,12 @@ def test_manager_log_health_is_scoped_to_current_container_start():
 def test_deploy_rejects_stale_or_mixed_wazuh_certificate_bundles():
     deploy = (ROOT / "deploy.sh").read_text(encoding="utf-8")
 
-    # The official Wazuh generator copies root-ca.* to root-ca-manager.*.
-    # FAST must reject a bundle where those files no longer match and must
-    # validate leaf certificates against that same CA before reusing them.
     assert "certificate_bundle_is_consistent" in deploy
     assert "root-ca-manager.pem" in deploy
     assert "root-ca-manager.key" in deploy
     assert "cmp -s /certificates/root-ca.pem /certificates/root-ca-manager.pem" in deploy
     assert "cmp -s /certificates/root-ca.key /certificates/root-ca-manager.key" in deploy
     assert "openssl verify -CAfile /certificates/root-ca.pem" in deploy
-
-    # Repair must release old bind mounts, remove the entire stale set,
-    # regenerate it, and remount fresh files into recreated containers.
     assert 'docker compose down >/dev/null 2>&1 || true' in deploy
     assert 'rm -rf "$WAZUH_CERT_DIR"' in deploy
     assert "generate-indexer-certs.yml" in deploy
@@ -117,7 +123,6 @@ def test_deploy_verifies_filebeat_to_indexer_tls_before_success():
     assert "/usr/share/filebeat/bin/filebeat test output" in deploy
     assert "Filebeat → Indexer" in deploy
 
-    # The success banner must only appear after the output/TLS check.
     check_call = deploy.rindex("if ! wait_for_filebeat_indexer_healthy; then")
     success_banner = deploy.index("✅ DEPLOYMENT COMPLETE")
     assert check_call < success_banner
@@ -130,3 +135,31 @@ def test_fast_status_requires_healthy_filebeat_indexer_pipeline():
     assert "/usr/share/filebeat/bin/filebeat test output" in fast
     assert "Filebeat -> Indexer alert pipeline" in fast
     assert '&& [ "$fb_health" = "healthy" ]' in fast
+
+
+def test_bruteforce_simulation_does_not_hide_transport_failures():
+    script = (ROOT / "tests" / "acceptance" / "sim" / "simulate_brute_force.sh").read_text(encoding="utf-8")
+
+    assert "MIN_REAL_FAILURES=5" in script
+    assert "NumberOfPasswordPrompts=1" in script
+    assert "real_failures" in script
+    assert "2>/dev/null || true" not in script
+
+
+def test_port_scan_simulation_is_non_root_safe_and_deterministic():
+    script = (ROOT / "tests" / "acceptance" / "sim" / "simulate_port_scan.sh").read_text(encoding="utf-8")
+    setup = (ROOT / "tests" / "acceptance" / "sim" / "setup_prereqs.sh").read_text(encoding="utf-8")
+
+    assert 'SCAN_TYPE="-sS"' in script
+    assert 'SCAN_TYPE="-sT"' in script
+    assert "nmap $SCAN_TYPE" not in script  # quoted variable must be used
+    assert "nmap failed" in script
+    assert "|| true" not in script.split("if command -v nmap", 1)[1].split("else", 1)[0]
+
+    for port in ("56001", "56008", "56012"):
+        assert port in script
+        assert port in setup
+
+    assert 'ufw deny log "${port}/tcp"' in setup
+    assert "ufw logging medium" in setup
+    assert '<location>journald</location>' in setup
