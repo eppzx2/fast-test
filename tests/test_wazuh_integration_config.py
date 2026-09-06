@@ -177,6 +177,9 @@ def test_lolbin_setup_collects_audit_log_and_simulation_is_offline():
     assert "systemctl restart wazuh-agent" in setup
 
     assert "systemctl is-active --quiet auditd" in script
-    assert '<location>/var/log/audit/audit.log</location>' in script
+    assert 'OSSEC_CONF="/var/ossec/etc/ossec.conf"' in script
+    assert 'elif [ -r "$OSSEC_CONF" ]; then' in script
+    assert "skipping the read-only config preflight" in script
+    assert "sudo -n auditctl -l" in script
     assert "http://127.0.0.1:9/fast-lolbin-test" in script
     assert "http://example.com/" not in script
