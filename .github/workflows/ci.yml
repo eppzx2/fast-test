@@ -1,0 +1,42 @@
+name: FAST CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: python -m pip install --disable-pip-version-check -r requirements.txt
+
+      - name: Python syntax
+        run: python -m compileall -q app.py cli.py core tests
+
+      - name: Shell syntax
+        run: |
+          bash -n deploy.sh
+          bash -n bin/fast
+          bash -n refresh_iocs.sh
+          bash -n linux/install-wazuh-agent.sh
+          for script in tests/acceptance/sim/*.sh; do bash -n "$script"; done
+
+      - name: Unit and static integration tests
+        env:
+          FAST_LIVE_FEEDS: "0"
+        run: python -m pytest -q tests --ignore=tests/acceptance
