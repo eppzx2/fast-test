@@ -160,10 +160,23 @@ def test_port_scan_simulation_is_non_root_safe_and_prefilter_logged():
     assert 'iptables -t mangle -I PREROUTING 1' in setup
     assert 'FAST_SCAN_PREFIX="FAST_PORTSCAN "' in setup
     assert '--dports "$PORTS_CSV"' in setup
-
-    # The setup must remain observational: it may LOG test traffic, but it must
-    # not enable UFW or install ACCEPT/DROP rules as a side effect.
     assert "ufw enable" not in setup
     assert "ufw deny" not in setup
     assert "-j ACCEPT" not in setup
     assert "-j DROP" not in setup
+
+
+def test_lolbin_setup_collects_audit_log_and_simulation_is_offline():
+    setup = (ROOT / "tests" / "acceptance" / "sim" / "setup_prereqs.sh").read_text(encoding="utf-8")
+    script = (ROOT / "tests" / "acceptance" / "sim" / "simulate_lolbin.sh").read_text(encoding="utf-8")
+
+    assert '<log_format>audit</log_format>' in setup
+    assert '<location>/var/log/audit/audit.log</location>' in setup
+    assert "audit-wazuh-c" in setup
+    assert "auditctl -l" in setup
+    assert "systemctl restart wazuh-agent" in setup
+
+    assert "systemctl is-active --quiet auditd" in script
+    assert '<location>/var/log/audit/audit.log</location>' in script
+    assert "http://127.0.0.1:9/fast-lolbin-test" in script
+    assert "http://example.com/" not in script
