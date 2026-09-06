@@ -3,6 +3,9 @@
 # Security default: the host-side port binds only to 127.0.0.1. To expose it
 # deliberately on another interface (for example a Tailscale address), set
 # FAST_WEB_BIND before `./bin/fast up`, e.g. FAST_WEB_BIND=100.x.y.z.
+# Threat-feed credentials stay in the git-ignored project .env file and are
+# loaded by python-dotenv from the /app bind mount; they are not copied into
+# Docker container environment metadata.
 
 services:
   ioc-collector-web:
@@ -19,7 +22,6 @@ services:
       FAST_WEB_HOST: "0.0.0.0"
       FAST_WEB_PORT: "5000"
       FAST_WEB_DEBUG: "0"
-      ABUSECH_AUTH_KEY: "${ABUSECH_AUTH_KEY:-}"
     volumes:
       - ../:/app
     healthcheck:
