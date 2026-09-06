@@ -7,19 +7,23 @@
 # This script does the following:
 #   1. Downloads the official Wazuh Docker stack (Manager+Indexer+Dashboard)
 #      (first run only - this step is skipped on later runs)
-#   2. Generates certificates (first run only)
+#   2. Verifies the Wazuh TLS certificate bundle and automatically regenerates
+#      it if files are missing, mixed, stale, or fail CA-chain validation
 #   3. Starts the Wazuh stack with a FULLY DEFAULT configuration
 #   4. Verifies the initial Manager state (authd/analysisd/remoted)
 #   5. Builds the IOC Collector image and runs the first collection
 #   6. Installs the CDB list + custom rules, validates them with analysisd -t
-#   7. Restarts the Manager once and verifies the final healthy state
+#   7. Restarts the Manager once and verifies Manager + Filebeat->Indexer health
 #
 # REQUIREMENTS: Docker + Docker Compose plugin must be installed
 #
-# USAGE: ./deploy.sh [--ip <MANAGER_IP>]
-#   --ip <IP>   Manually set the Manager's IP (to display for agents).
-#               If not provided, it's auto-detected: first the Tailscale
-#               IP, if not found the public IP, if not found the local IP.
+# USAGE: ./deploy.sh [--ip <MANAGER_IP>] [--demo] [--reset-certs]
+#   --ip <IP>       Manually set the Manager's IP (to display for agents).
+#                   If not provided, it's auto-detected: first the Tailscale
+#                   IP, if not found the public IP, if not found the local IP.
+#   --demo          Seed bundled fixture IOCs instead of fetching live feeds.
+#   --reset-certs   Force a clean Wazuh TLS certificate regeneration before
+#                   startup. Named Docker data volumes are preserved.
 # TO REFRESH (only update IOCs): ./refresh_iocs.sh
 # ============================================================
 
@@ -28,6 +32,7 @@ set -e
 # --- Parse parameters ---
 MANAGER_IP_OVERRIDE=""
 DEMO_MODE=false
+FORCE_REGENERATE_CERTS=false
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --ip|-i)
@@ -38,15 +43,20 @@ while [[ $# -gt 0 ]]; do
             DEMO_MODE=true
             shift
             ;;
+        --reset-certs)
+            FORCE_REGENERATE_CERTS=true
+            shift
+            ;;
         -h|--help)
-            echo "Usage: ./deploy.sh [--ip <MANAGER_IP>] [--demo]"
+            echo "Usage: ./deploy.sh [--ip <MANAGER_IP>] [--demo] [--reset-certs]"
             echo ""
-            echo "  --ip <IP>   Manually set the Manager's IP."
-            echo "              If not provided, it's auto-detected."
-            echo "  --demo      Seed IOCs from the bundled fixture"
-            echo "              (sample_output/ioc_export.json) instead of"
-            echo "              fetching live feeds. No network calls to"
-            echo "              external feeds are made in this mode."
+            echo "  --ip <IP>       Manually set the Manager's IP."
+            echo "                  If not provided, it's auto-detected."
+            echo "  --demo          Seed IOCs from the bundled fixture"
+            echo "                  (sample_output/ioc_export.json) instead of"
+            echo "                  fetching live feeds. No external feed calls."
+            echo "  --reset-certs   Force clean regeneration of all Wazuh TLS certs"
+            echo "                  before startup; persistent Docker data is kept."
             exit 0
             ;;
         *)
@@ -59,10 +69,14 @@ done
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WAZUH_DIR="$PROJECT_ROOT/wazuh-docker"
 WAZUH_VERSION="v4.9.0"
-WAZUH_MANAGER_CONF="$WAZUH_DIR/single-node/config/wazuh_cluster/wazuh_manager.conf"
+WAZUH_SINGLE_NODE_DIR="$WAZUH_DIR/single-node"
+WAZUH_CERT_DIR="$WAZUH_SINGLE_NODE_DIR/config/wazuh_indexer_ssl_certs"
+WAZUH_MANAGER_CONF="$WAZUH_SINGLE_NODE_DIR/config/wazuh_cluster/wazuh_manager.conf"
 MANAGER_CONTAINER="single-node-wazuh.manager-1"
 HEALTH_CHECK_TIMEOUT=90
 HEALTH_CHECK_INTERVAL=5
+CERTS_REGENERATED=false
+CERT_GENERATOR_IMAGE="wazuh/wazuh-certs-generator:0.0.2"
 
 echo "════════════════════════════════════════════════════════"
 echo "  F.A.S.T. - Deployment Starting"
@@ -173,6 +187,116 @@ wait_for_manager_healthy() {
     return 1
 }
 
+# Wazuh's v4.9 certificate generator creates one CA and then copies
+# root-ca.pem/root-ca.key to root-ca-manager.pem/root-ca-manager.key. A mixed
+# directory left by an older deployment can therefore make Filebeat reject the
+# Indexer with x509 "unknown authority" while the containers themselves look UP.
+certificate_bundle_is_consistent() {
+    local required=(
+        root-ca.pem
+        root-ca.key
+        root-ca-manager.pem
+        root-ca-manager.key
+        wazuh.indexer.pem
+        wazuh.indexer-key.pem
+        wazuh.manager.pem
+        wazuh.manager-key.pem
+        wazuh.dashboard.pem
+        wazuh.dashboard-key.pem
+        admin.pem
+        admin-key.pem
+    )
+    local file
+
+    [ -d "$WAZUH_CERT_DIR" ] || return 1
+    for file in "${required[@]}"; do
+        [ -s "$WAZUH_CERT_DIR/$file" ] || return 1
+    done
+
+    # Certificate files are intentionally mode 0400 and owned by service UIDs,
+    # so validate them as root inside the official cert-generator image instead
+    # of assuming the host user can read them. This also avoids a host OpenSSL
+    # dependency and verifies every leaf certificate against the same root CA.
+    docker run --rm \
+        --entrypoint /bin/sh \
+        -v "$WAZUH_CERT_DIR:/certificates:ro" \
+        "$CERT_GENERATOR_IMAGE" \
+        -c '
+            set -eu
+            cmp -s /certificates/root-ca.pem /certificates/root-ca-manager.pem
+            cmp -s /certificates/root-ca.key /certificates/root-ca-manager.key
+            for cert in wazuh.indexer.pem wazuh.manager.pem wazuh.dashboard.pem admin.pem; do
+                openssl verify -CAfile /certificates/root-ca.pem "/certificates/$cert" >/dev/null
+            done
+        ' >/dev/null 2>&1
+}
+
+regenerate_wazuh_certificates() {
+    echo ""
+    echo "🔐 Rebuilding Wazuh TLS certificate bundle from scratch..."
+    echo "   Persistent named Docker data volumes will NOT be deleted."
+
+    # File bind mounts keep old inodes across a simple container restart. Bring
+    # the compose stack down first so the regenerated files are remounted cleanly.
+    docker compose down >/dev/null 2>&1 || true
+
+    rm -rf "$WAZUH_CERT_DIR"
+    mkdir -p "$WAZUH_CERT_DIR"
+    docker compose -f generate-indexer-certs.yml run --rm generator
+
+    if ! certificate_bundle_is_consistent; then
+        echo "✗ ERROR: Newly generated Wazuh certificate bundle failed consistency validation." >&2
+        exit 1
+    fi
+
+    CERTS_REGENERATED=true
+    echo "✓ Clean Wazuh TLS certificate bundle generated and validated"
+}
+
+prepare_wazuh_certificates() {
+    if [ "$FORCE_REGENERATE_CERTS" = true ]; then
+        echo "⚠️  --reset-certs requested: discarding the previous Wazuh TLS bundle."
+        regenerate_wazuh_certificates
+        return
+    fi
+
+    if certificate_bundle_is_consistent; then
+        echo "✓ Wazuh TLS certificate bundle is complete and internally consistent"
+        return
+    fi
+
+    if [ -d "$WAZUH_CERT_DIR" ] && [ -n "$(ls -A "$WAZUH_CERT_DIR" 2>/dev/null)" ]; then
+        echo "⚠️  Stale/incomplete/mixed Wazuh TLS certificates detected."
+        echo "   They will be removed and regenerated automatically."
+    else
+        echo "🔐 No complete Wazuh TLS certificate bundle found."
+    fi
+    regenerate_wazuh_certificates
+}
+
+wait_for_filebeat_indexer_healthy() {
+    local elapsed=0
+    local output=""
+    echo "🔍 Checking Filebeat → Wazuh Indexer TLS/output..."
+
+    while [ "$elapsed" -lt "$HEALTH_CHECK_TIMEOUT" ]; do
+        if output=$(docker exec "$MANAGER_CONTAINER" \
+            /usr/share/filebeat/bin/filebeat test output -e \
+            -c /etc/filebeat/filebeat.yml 2>&1); then
+            echo "✓ Filebeat can securely connect to the Wazuh Indexer"
+            return 0
+        fi
+
+        sleep "$HEALTH_CHECK_INTERVAL"
+        elapsed=$((elapsed + HEALTH_CHECK_INTERVAL))
+        echo "  ... waiting for Filebeat/Indexer (${elapsed}s/${HEALTH_CHECK_TIMEOUT}s)"
+    done
+
+    echo "✗ ERROR: Filebeat cannot connect to the Wazuh Indexer."
+    echo "$output" | tail -40
+    return 1
+}
+
 # Wazuh requires every CDB list referenced from a rule to also be registered
 # inside the <ruleset> block of ossec.conf. The official v4.9.0 Docker stack
 # bind-mounts this file into the Manager on every container start, so update
@@ -222,22 +346,21 @@ else
     echo "✓ Wazuh Docker stack already exists ($WAZUH_DIR)"
 fi
 
-cd "$WAZUH_DIR/single-node"
-
-if [ ! -d "config/wazuh_indexer_ssl_certs" ] || [ -z "$(ls -A config/wazuh_indexer_ssl_certs 2>/dev/null)" ]; then
-    echo ""
-    echo "🔐 Generating SSL certificates..."
-    docker compose -f generate-indexer-certs.yml run --rm generator
-else
-    echo "✓ Certificates already exist"
-fi
+cd "$WAZUH_SINGLE_NODE_DIR"
+prepare_wazuh_certificates
 
 echo "🩺 Applying container healthcheck definitions (no volumes, safe to reuse)..."
 cp "$PROJECT_ROOT/docker/healthcheck.override.yml" "./docker-compose.override.yml"
 
 echo ""
 echo "🚀 Starting Wazuh Manager + Indexer + Dashboard..."
-docker compose up -d
+if [ "$CERTS_REGENERATED" = true ]; then
+    # The stack was brought down before replacing bind-mounted certificate files.
+    # Force recreation ensures every service mounts the fresh certificate set.
+    docker compose up -d --force-recreate
+else
+    docker compose up -d
+fi
 
 echo ""
 echo "⏳ Waiting for containers to start (15 seconds)..."
@@ -312,6 +435,16 @@ echo "⏳ Checking health after the final restart..."
 sleep 10
 if ! wait_for_manager_healthy; then
     echo "✗ Deployment failed - Manager is unhealthy after loading FAST rules/CDB."
+    exit 1
+fi
+
+# A container being UP is not enough: Threat Hunting depends on Filebeat being
+# able to validate the Indexer TLS chain and publish alerts. Fail deployment if
+# that path is broken so FAST can never report a successful deploy with an
+# x509/CA mismatch hidden underneath it.
+if ! wait_for_filebeat_indexer_healthy; then
+    echo "✗ Deployment failed - Wazuh alert pipeline (Filebeat → Indexer) is unhealthy."
+    echo "  Re-run './bin/fast up --reset-certs' to force a clean TLS rebuild."
     exit 1
 fi
 
