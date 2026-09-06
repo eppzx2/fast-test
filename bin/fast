@@ -21,6 +21,9 @@
 #     Wazuh health definition mirror deploy.sh. CRITICAL log checks are
 #     scoped to the CURRENT container start so errors from an earlier
 #     `docker restart` cannot poison the current status forever.
+#   - Wazuh health includes the alert-delivery path: Filebeat must be
+#     able to establish its TLS connection to the Indexer. Containers
+#     being merely "running" is not sufficient for FAST HEALTHY.
 #   - `down` intentionally never runs `docker compose down -v` (which
 #     would delete named volumes / persistent data). Only a plain
 #     `docker compose down` is used, exactly as already documented in
@@ -33,7 +36,7 @@
 #     fabricated "process" status.
 #
 # USAGE: ./bin/fast <up|down|restart|status> [options]
-#   ./bin/fast up [--ip <IP>]   options are forwarded to deploy.sh
+#   ./bin/fast up [--ip <IP>] [--reset-certs]   options are forwarded to deploy.sh
 #   ./bin/fast --help
 # ============================================================
 
@@ -130,6 +133,25 @@ manager_process_health() {
     proc_count=$(docker exec "$MANAGER_CONTAINER" ps aux 2>/dev/null | grep -cE "wazuh-authd|wazuh-analysisd|wazuh-remoted" || true)
 
     if [ "$critical_errors" -eq 0 ] && [ "$proc_count" -ge 3 ]; then
+        echo "healthy"
+    else
+        echo "unhealthy"
+    fi
+}
+
+# Threat Hunting depends on Filebeat successfully publishing Manager alerts to
+# the Indexer. This catches TLS/CA mismatches that otherwise leave all three
+# Wazuh containers in a misleading "running" state.
+filebeat_indexer_health() {
+    if [ "$(container_state "$MANAGER_CONTAINER")" != "running" ] \
+       || [ "$(container_state "$INDEXER_CONTAINER")" != "running" ]; then
+        echo "unreachable"
+        return
+    fi
+
+    if docker exec "$MANAGER_CONTAINER" \
+        /usr/share/filebeat/bin/filebeat test output -e \
+        -c /etc/filebeat/filebeat.yml >/dev/null 2>&1; then
         echo "healthy"
     else
         echo "unhealthy"
@@ -269,6 +291,8 @@ cmd_status() {
     echo "================================="
     echo ""
 
+    local fb_health="unreachable"
+
     if ! docker_daemon_up; then
         if ! docker_available; then
             echo "Docker:              NOT INSTALLED"
@@ -314,6 +338,13 @@ cmd_status() {
         else
             m_health="unreachable"
         fi
+
+        fb_health=$(filebeat_indexer_health)
+        echo "Filebeat -> Indexer alert pipeline: $fb_health"
+        if [ "$fb_health" = "unhealthy" ]; then
+            echo "  Alert indexing is broken; Threat Hunting may show no results."
+            echo "  Run './bin/fast up --reset-certs' if the error is TLS/CA related."
+        fi
     fi
 
     echo ""
@@ -354,6 +385,7 @@ cmd_status() {
         echo "  FAST                 [ NOT DEPLOYED ]"
         return 4
     elif [ "${m_health:-unreachable}" = "healthy" ] \
+         && [ "$fb_health" = "healthy" ] \
          && [ "$(container_state "$INDEXER_CONTAINER")" = "running" ] \
          && [ "$(container_state "$DASHBOARD_CONTAINER")" = "running" ]; then
         echo "  FAST                 [ HEALTHY ]"
@@ -379,8 +411,12 @@ Commands:
   restart     Restart FAST
   status      Show FAST and service status
 
-Options:
-  -h, --help   Show this help message
+Options forwarded to deploy.sh for up/restart:
+  --ip <IP>       Manager IP to display/use for agent setup
+  --reset-certs   Force a clean Wazuh TLS certificate regeneration
+
+General options:
+  -h, --help      Show this help message
 
 Exit codes (status, and up/restart which end with a status check):
   0  HEALTHY        3  DEGRADED
@@ -390,6 +426,7 @@ Exit codes (status, and up/restart which end with a status check):
 Examples:
   ./bin/fast up
   ./bin/fast up --ip 100.87.195.65
+  ./bin/fast up --reset-certs
   ./bin/fast demo
   ./bin/fast status
   ./bin/fast down
