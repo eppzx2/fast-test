@@ -1,148 +1,132 @@
 # FAST — Detection Runbook
 
-Custom Wazuh detection rules for three simulated attack scenarios:
-SSH brute force, an Nmap-style port scan, and a `wget`-masquerading-
-as-`httpd` LOLBin. Rules live in
-[`docker/rules/local_rules.xml`](../docker/rules/local_rules.xml)
-and are applied the same way as the project's existing TALON IOC
-Collector detection rules (via `docker cp`, after the Manager reaches a healthy
-state — see `docs/DEPLOYMENT_GUIDE.md`).
+Technical reference for the three Linux attack simulations used by FAST. The
+rules live in `docker/rules/local_rules.xml`; the scripts live under
+`tests/acceptance/sim/`.
 
-> **Looking for a step-by-step walkthrough** (which machine to run
-> each script from, exact commands, troubleshooting)? See
-> [`docs/SIMULATION_GUIDE.md`](SIMULATION_GUIDE.md). This runbook is
-> the technical reference (rule IDs, design assumptions).
+## Verified rule chain
 
-## Rule IDs & Expected Alerts
+| FAST rule | Scenario | Level | Verified base | Trigger |
+|---|---|---:|---|---|
+| `100200` | SSH brute force | 10 | Wazuh `5760` | 5 failed password authentications from one source IP in 60s |
+| `100210` | Port-scan probe | 3 | Wazuh `4100` | one `FAST_PORTSCAN` kernel/firewall event |
+| `100211` | Port scan | 7 | FAST `100210` | 8+ probes from one source IP in 60s |
+| `100220` | LOLBin signal | 6 | Wazuh `80792` | process named `httpd` executing from a non-standard path |
+| `100221` | LOLBin confirmed | 12 | FAST `100220` | same audit event also contains wget-style command-line evidence |
 
-| Rule ID | Scenario | Level | Base rule it builds on | Fires when |
-|---|---|---|---|---|
-| `100200` | SSH brute force | 10 | `5716` (sshd auth failure) | 5 failed SSH logins from the same source IP within 60s |
-| `100210` | Port scan (signal) | 3 | `4100` (firewall rules grouped) | A single blocked/refused connection is logged (low-severity, feeds 100211) |
-| `100211` | Port scan (confirmed) | 7 | `100210` | 8+ blocked/refused connection attempts from the same source IP within 60s |
-| `100220` | LOLBin (signal) | 6 | `80792` (audit command execution) | A process named `httpd` runs from a non-standard path (feeds 100221) |
-| `100221` | LOLBin (confirmed) | 12 | `100220` | The same process's command line also contains wget-style arguments (URL / `-O` / `--no-check-certificate`) |
+### SSH
 
-All rule IDs are in the `100200`–`100229` range, chosen to avoid
-collision with the project's existing TALON IOC Collector rules (`100100`–
-`100102`) and to stay within Wazuh's recommended custom-rule range
-(`100000`–`120000`).
+Wazuh 4.9 classifies the simulated failed-password event with rule `5760`
+(`sshd: authentication failed`). FAST intentionally correlates that concrete
+rule rather than a broad group. Wazuh's own 4.9 ruleset also correlates `5760`
+with rule `5763`; FAST uses its own 5 failures / 60 seconds threshold.
 
-## Design Notes & Assumptions
+Live validation completed on the project target:
 
-These were written against Wazuh's publicly documented default
-ruleset (verified via Wazuh's own rule-writing documentation and
-ruleset source, not assumed from memory):
+- base rule `5760` observed;
+- FAST rule `100200` observed at level 10;
+- source-IP correlation worked as intended.
 
-- **SSH brute force** chains off rule `5716` ("sshd: authentication
-  failed", part of the default `sshd_rules.xml`, level 5). No extra
-  agent-side configuration is needed — this project's Wazuh agents
-  already collect `journald` by default, which includes SSH auth
-  events.
-- **Port scan**: Wazuh's shipped ruleset does not include a decoder
-  literally named `connection_refused`. The closest, verified,
-  existing mechanism is the `kernel` decoder feeding rule `4100`
-  ("Firewall rules grouped"), used for iptables/UFW log lines. Rule
-  `100210` matches on `BLOCK|REJECT|DROP` in the raw log line (since
-  the default decoder doesn't expose the firewall action as its own
-  field), and `100211` correlates 8+ such events from one source IP
-  within 60 seconds. **Requires UFW (or another logged firewall)
-  enabled on the target** — see Prerequisites below.
-- **LOLBin**: chains off rule `80792` (Wazuh's default "audit command
-  execution" rule) and the confirmed default `auditd` decoder fields
-  `audit.command` (process name) and `audit.exe` (actual binary
-  path). Detection requires *two* signals to fire the high-confidence
-  alert (`100221`): the process presents itself as `httpd` from an
-  unexpected path, **and** its command line looks like wget's, not
-  Apache's. **Requires `auditd` installed and watching `execve` on
-  the target** — see Prerequisites below.
+### Port scan
 
-  If your specific Wazuh ruleset version includes rule `92053` as an
-  equivalent LOLBin/audit rule, you can additionally chain a rule off
-  it — check first with:
-  ```bash
-  docker exec single-node-wazuh.manager-1 grep -r 'id="92053"' /var/ossec/ruleset/rules/
-  ```
-  This project's rules do not hard-depend on `92053`, since its
-  presence/exact meaning could not be verified across all Wazuh
-  versions.
+`setup_prereqs.sh` installs a narrow **logging-only** iptables rule in
+`mangle/PREROUTING` for reserved test ports `56001..56012`. It writes the
+prefix `FAST_PORTSCAN` before normal Tailscale/UFW/filter decisions. It does
+**not** add ACCEPT/DROP policy and does not enable UFW.
 
-## Prerequisites
+This makes the test deterministic without changing the target's firewall
+policy. Wazuh rule `4100` handles the kernel/firewall event, FAST `100210`
+marks each probe, and `100211` performs same-source correlation.
 
-SSH brute-force detection works out of the box. The other two need
-one-time setup **on the target host** (the machine running the Wazuh
-Agent being exercised by the simulations — not the Manager):
+Live validation completed on the project target:
+
+- multiple `100210` alerts observed;
+- `100211` observed at level 7 after 8+ probes;
+- source IP and destination test ports were decoded correctly.
+
+### LOLBin
+
+The target must run `auditd`, watch `execve` with key `audit-wazuh-c`, and have
+the Wazuh agent collect `/var/log/audit/audit.log` using `log_format= audit`.
+`setup_prereqs.sh` now configures and verifies all of this automatically and
+restarts the agent only when its collection configuration changes.
+
+Wazuh rule `80792` is the audit command rule. FAST `100220` checks decoded
+`audit.command`/`audit.exe`; `100221` confirms wget-style command-line evidence.
+The simulator copies the local `wget` binary to `/tmp/httpd` and runs it against
+`127.0.0.1`, so the simulation has no external-network dependency.
+
+## One-time target preparation
+
+Run on the **Linux target that has the Wazuh agent**:
 
 ```bash
+cd ~/fast-test
+git pull
 sudo ./tests/acceptance/sim/setup_prereqs.sh
 ```
 
-This enables UFW with connection logging, and installs + configures
-`auditd` to watch `execve` syscalls (key `audit-wazuh-c`). If the
-agent's `ossec.conf` doesn't yet collect `/var/log/audit/audit.log`,
-the script prints the exact `<localfile>` block to add.
+Expected checks include:
 
-## Running the Simulations
+```text
+Wazuh agent already collects journald (or it is added)
+FAST pre-filter port-scan logging rule present
+auditd is watching execve syscalls (key=audit-wazuh-c)
+Wazuh agent is configured to collect /var/log/audit/audit.log
+```
 
-All three scripts are under
-[`tests/acceptance/sim/`](../tests/acceptance/sim/).
+## Manual simulations
+
+Brute force and port scan are launched from a runner that can reach the target:
 
 ```bash
-# From any machine that can reach the target over SSH:
-./tests/acceptance/sim/simulate_brute_force.sh <target_host>
-./tests/acceptance/sim/simulate_port_scan.sh <target_host>
+./tests/acceptance/sim/simulate_brute_force.sh <TARGET_IP> nonexistent_bruteforce_test_user 8
+./tests/acceptance/sim/simulate_port_scan.sh <TARGET_IP>
+```
 
-# Must run ON the target host itself (auditd only sees local execs):
+LOLBin runs **on the target itself**:
+
+```bash
 ./tests/acceptance/sim/simulate_lolbin.sh
 ```
 
-## Running the Acceptance Tests
+Expected final FAST rule IDs are `100200`, `100211`, and `100221`.
+
+## Automated acceptance tests
+
+Run from the Manager/repository checkout with access to the Docker socket:
 
 ```bash
-export TARGET_HOST=<ip-of-the-agent-host>
-export TARGET_SSH_USER=root        # used only by the LOLBin test (SSH key auth)
-export BRUTE_FORCE_SSH_USER=nonexistent_bruteforce_test_user
-
-pytest tests/acceptance/ -v
+export TARGET_HOST=<TARGET_IP>
+export TARGET_SSH_USER=<target-ssh-user>   # needed by remote LOLBin test
+pytest tests/acceptance -v
 ```
 
-Each test:
-1. Records the current line count of the Manager's `alerts.json`.
-2. Runs the corresponding simulation script.
-3. Polls `alerts.json` (via `docker exec` on the Manager container)
-   for a **new** alert matching the expected rule ID, for up to 60
-   seconds.
-4. Asserts the alert appeared and its level meets the ticket's
-   minimum (`>= 5` for brute force / port scan, `>= 6` for LOLBin).
+The tests snapshot the current Manager `alerts.json` position, run the
+simulation, and wait only for **new** alerts. If a test fails, its assertion
+identifies whether the failure occurred at the base-signal stage or the FAST
+correlation stage.
 
-Tests **skip** (not fail) if `TARGET_HOST` isn't set, or if the Wazuh
-Manager container isn't running — they never break the existing
-`pytest tests/` unit-test suite, which remains fully offline and
-unaffected (`tests/acceptance/` is a separate directory with its own
-`conftest.py`).
+## Quick diagnostics
 
-## Testing Performed
+On the Manager:
 
-The following was verified in the development sandbox (no live
-Docker/Wazuh environment was available there):
+```bash
+docker exec single-node-wazuh.manager-1 \
+  sh -c "grep -E '\"id\":\"(5760|100200|100210|100211|80792|100220|100221)\"' \
+  /var/ossec/logs/alerts/alerts.json | tail -50"
+```
 
-- `docker/rules/local_rules.xml` — validated as well-formed XML after
-  the additions (parsed successfully, no unclosed tags), and rule IDs
-  confirmed unique (no collisions with existing `100100`–`100102`).
-- All four new shell scripts (`setup_prereqs.sh`,
-  `simulate_brute_force.sh`, `simulate_port_scan.sh`,
-  `simulate_lolbin.sh`) — passed `bash -n` syntax checks.
-- All four new Python files (`conftest.py` and the three
-  `test_*.py` files) — compiled cleanly with `python3 -m py_compile`.
-- `pytest tests/acceptance/ -v` — all three tests correctly **skip**
-  (Manager not running in the sandbox), confirming the skip logic
-  works and nothing crashes without live infrastructure.
-- `pytest tests/ -q` (existing unit suite + new acceptance tests
-  together) — **56 passed, 3 skipped**, confirming the new files do
-  not break any existing test.
+On the target:
 
-**Not yet verified** (requires a live deployed environment): that
-each simulation script actually triggers its rule within 60 seconds
-against a real Wazuh Manager + Agent. Run the commands under "Running
-the Acceptance Tests" above against a deployed FAST stack
-(`./bin/fast up` first) to confirm this end-to-end.
+```bash
+sudo journalctl -k --since '2 minutes ago' | grep FAST_PORTSCAN
+sudo auditctl -l | grep audit-wazuh-c
+sudo grep -F '<location>/var/log/audit/audit.log</location>' /var/ossec/etc/ossec.conf
+```
+
+## Scope
+
+These simulation rules are Linux-oriented. A connected Windows agent is useful
+for general Wazuh validation but does not replace the Linux target for sshd,
+kernel/iptables, or auditd simulations.
