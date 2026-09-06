@@ -86,3 +86,38 @@ def test_manager_log_health_is_scoped_to_current_container_start():
             'docker logs "$MANAGER_CONTAINER" 2>&1 | grep -c "CRITICAL"'
             not in text
         ), relative_path
+
+
+def test_deploy_rejects_stale_or_mixed_wazuh_certificate_bundles():
+    deploy = (ROOT / "deploy.sh").read_text(encoding="utf-8")
+
+    # The official Wazuh generator copies root-ca.* to root-ca-manager.*.
+    # FAST must reject a bundle where those files no longer match and must
+    # validate leaf certificates against that same CA before reusing them.
+    assert "certificate_bundle_is_consistent" in deploy
+    assert "root-ca-manager.pem" in deploy
+    assert "root-ca-manager.key" in deploy
+    assert "cmp -s /certificates/root-ca.pem /certificates/root-ca-manager.pem" in deploy
+    assert "cmp -s /certificates/root-ca.key /certificates/root-ca-manager.key" in deploy
+    assert "openssl verify -CAfile /certificates/root-ca.pem" in deploy
+
+    # Repair must release old bind mounts, remove the entire stale set,
+    # regenerate it, and remount fresh files into recreated containers.
+    assert 'docker compose down >/dev/null 2>&1 || true' in deploy
+    assert 'rm -rf "$WAZUH_CERT_DIR"' in deploy
+    assert "generate-indexer-certs.yml" in deploy
+    assert "docker compose up -d --force-recreate" in deploy
+    assert "--reset-certs" in deploy
+
+
+def test_deploy_verifies_filebeat_to_indexer_tls_before_success():
+    deploy = (ROOT / "deploy.sh").read_text(encoding="utf-8")
+
+    assert "wait_for_filebeat_indexer_healthy" in deploy
+    assert "/usr/share/filebeat/bin/filebeat test output" in deploy
+    assert "Filebeat → Indexer" in deploy
+
+    # The success banner must only appear after the output/TLS check.
+    check_call = deploy.rindex("if ! wait_for_filebeat_indexer_healthy; then")
+    success_banner = deploy.index("✅ DEPLOYMENT COMPLETE")
+    assert check_call < success_banner
