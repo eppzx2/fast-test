@@ -63,7 +63,7 @@ def test_ssh_bruteforce_rule_correlates_wazuh_5760():
     rule = rules_by_id["100200"]
 
     assert rule.findtext("if_matched_sid") == "5760"
-    assert rule.find("same_srcip") is not None
+    assert rule.find("same_source_ip") is not None
     assert rule.attrib["frequency"] == "5"
     assert rule.attrib["timeframe"] == "60"
     assert rule.find("if_matched_group") is None
@@ -78,7 +78,7 @@ def test_portscan_rule_uses_deterministic_fast_kernel_marker():
     assert base.findtext("if_sid") == "4100"
     assert base.findtext("match") == "FAST_PORTSCAN"
     assert correlation.findtext("if_matched_sid") == "100210"
-    assert correlation.find("same_srcip") is not None
+    assert correlation.find("same_source_ip") is not None
 
 
 def test_lolbin_confirmation_is_same_event_child():
