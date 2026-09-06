@@ -1,375 +1,279 @@
-"""
-IOC Feed Fetcher Module
+"""Threat-intelligence feed fetchers used by FAST.
 
-Module responsible for pulling IOCs from various open threat
-intelligence feeds.
-
-Supported feeds:
-- Feodo Tracker
-- URLhaus  
-- MalwareBazaar
-- Spamhaus DROP
+The collector intentionally treats individual feed failures as non-fatal so one
+provider outage cannot stop the remaining feeds. Callers can inspect the
+returned per-feed lists and decide whether an all-feed failure is fatal.
 """
 
-import logging
-import requests
 import csv
-from typing import List, Dict, Any
-from datetime import datetime
+import json
+import logging
+import os
+from typing import Any, Dict, List
+
+import requests
 
 logger = logging.getLogger(__name__)
 
-# Feed URLs
-FEED_URLs = {
+USER_AGENT = "FAST-IOC-Collector/1.0 (+https://github.com/eppzx2/fast-test)"
+REQUEST_TIMEOUT = 20
+
+FEED_URLS = {
     "feodo": "https://feodotracker.abuse.ch/downloads/ipblocklist.json",
-    "urlhaus": "https://urlhaus.abuse.ch/downloads/csv_recent/",
-    "malwarebazaar": "https://bazaar.abuse.ch/export/csv/recent/",
-    "spamhaus": "https://www.spamhaus.org/drop/drop.txt"
+    # Compatibility dump. When ABUSECH_AUTH_KEY is set, URLhaus uses its
+    # current authenticated export endpoint instead.
+    "urlhaus_legacy": "https://urlhaus.abuse.ch/downloads/csv_recent/",
+    "urlhaus_api": "https://urlhaus-api.abuse.ch/v2/files/exports/{auth_key}/recent.csv",
+    # MalwareBazaar's current Community API requires an Auth-Key. The legacy
+    # CSV URL is retained only as a best-effort compatibility fallback.
+    "malwarebazaar_api": "https://mb-api.abuse.ch/api/v1/",
+    "malwarebazaar_legacy": "https://bazaar.abuse.ch/export/csv/recent/",
+    # Spamhaus recommends the JSON DROP dataset; the old text file is legacy.
+    "spamhaus": "https://www.spamhaus.org/drop/drop_v4.json",
 }
 
 
-def fetch_feodo() -> List[Dict[str, Any]]:
-    """
-    Fetches botnet C2 IP addresses from Feodo Tracker.
+def _headers() -> Dict[str, str]:
+    return {"User-Agent": USER_AGENT}
 
-    Returns IPs and related metadata in JSON format.
 
-    Returns:
-        List[Dict]: List of IOC data
-        On error: empty list []
+def _abusech_auth_key() -> str:
+    return os.getenv("ABUSECH_AUTH_KEY", "").strip()
 
-    Example output:
-        [
+
+def _parse_commented_csv(text: str, default_fieldnames: List[str]) -> List[Dict[str, Any]]:
+    """Parse abuse.ch-style CSV files whose header is prefixed with '#'."""
+    lines = text.splitlines()
+    data_lines = [line for line in lines if line and not line.startswith("#")]
+    if not data_lines:
+        return []
+
+    header_line = None
+    for line in lines:
+        stripped = line.lstrip("# ").strip()
+        if not stripped:
+            continue
+        # Headers used by URLhaus/MalwareBazaar begin with id/first_seen.
+        lowered = stripped.lower().lstrip('"')
+        if lowered.startswith("id,") or lowered.startswith("first_seen"):
+            header_line = stripped
+            break
+
+    if header_line:
+        # Use csv.reader rather than split(',') so quoted headers remain safe.
+        fieldnames = [h.strip().strip('"') for h in next(csv.reader([header_line]))]
+    else:
+        fieldnames = default_fieldnames
+
+    reader = csv.DictReader(data_lines, fieldnames=fieldnames, skipinitialspace=True)
+    parsed: List[Dict[str, Any]] = []
+    for row in reader:
+        parsed.append(
             {
-                "botnet": "dridex",
-                "ip_address": "192.168.1.1",
-                "port": "443",
-                "country_code": "RU",
-                "last_dns_query": "2024-01-15"
-            },
-            ...
-        ]
-    """
-    url = FEED_URLs["feodo"]
-    iocs = []
-    
+                key: (value.strip().strip('"') if isinstance(value, str) else value)
+                for key, value in row.items()
+                if key is not None
+            }
+        )
+    return parsed
+
+
+def fetch_feodo() -> List[Dict[str, Any]]:
+    """Fetch Feodo Tracker botnet C2 IPs."""
+    url = FEED_URLS["feodo"]
     try:
-        logger.info(f"Fetching data from Feodo Tracker: {url}")
-        
-        # HTTP request (User-Agent is required)
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-        }
-        response = requests.get(url, headers=headers, timeout=15)
+        logger.info("Fetching Feodo Tracker: %s", url)
+        response = requests.get(url, headers=_headers(), timeout=REQUEST_TIMEOUT)
         response.raise_for_status()
-        
-        # Parse JSON
-        data = response.json()
-        
-        # `data` can be a list, or shaped like {"data": [...]}
-        if isinstance(data, dict) and "data" in data:
-            iocs = data["data"]
-        elif isinstance(data, list):
-            iocs = data
+        payload = response.json()
+        if isinstance(payload, dict) and isinstance(payload.get("data"), list):
+            result = payload["data"]
+        elif isinstance(payload, list):
+            result = payload
         else:
-            logger.warning("Feodo: Unexpected JSON structure")
+            logger.warning("Feodo: unexpected JSON structure")
             return []
-        
-        logger.info(f"Feodo: {len(iocs)} IOCs fetched")
-        return iocs
-        
-    except requests.exceptions.Timeout:
-        logger.error("Feodo Tracker: Timeout (15s)")
-        return []
-    except requests.exceptions.ConnectionError:
-        logger.error("Feodo Tracker: Connection error")
-        return []
-    except requests.exceptions.HTTPError as e:
-        logger.error(f"Feodo Tracker: HTTP {e.response.status_code}")
-        return []
-    except ValueError:
-        logger.error("Feodo Tracker: JSON parse error")
-        return []
-    except Exception as e:
-        logger.error(f"Feodo Tracker: Unknown error: {str(e)}")
-        return []
+        logger.info("Feodo: %d records fetched", len(result))
+        return result
+    except requests.RequestException as exc:
+        logger.error("Feodo Tracker request failed: %s", exc)
+    except (ValueError, TypeError) as exc:
+        logger.error("Feodo Tracker parse failed: %s", exc)
+    return []
 
 
 def fetch_urlhaus() -> List[Dict[str, Any]]:
+    """Fetch recent malicious URLs from URLhaus.
+
+    Current URLhaus Community API exports require an Auth-Key. FAST uses that
+    endpoint whenever ABUSECH_AUTH_KEY is configured and otherwise retains the
+    historical CSV endpoint as a compatibility fallback.
     """
-    Fetches malicious URLs from URLhaus.
+    auth_key = _abusech_auth_key()
+    if auth_key:
+        url = FEED_URLS["urlhaus_api"].format(auth_key=auth_key)
+    else:
+        url = FEED_URLS["urlhaus_legacy"]
+        logger.warning(
+            "URLhaus: ABUSECH_AUTH_KEY is not set; using the legacy CSV compatibility endpoint"
+        )
 
-    Returns URLs, dates, and status information in CSV format.
-
-    Returns:
-        List[Dict]: List of IOC data
-        On error: empty list []
-
-    Example output:
-        [
-            {
-                "id": "12345",
-                "dateadded": "2024-01-15 10:30:00",
-                "url": "http://evil.com/malware.exe",
-                "url_status": "online",
-                "threat": "malware_download",
-                "tags": "exe,trojan",
-                "reporter": "abuse_ch"
-            },
-            ...
-        ]
-    """
-    url = FEED_URLs["urlhaus"]
-    iocs = []
-    
     try:
-        logger.info(f"Fetching data from URLhaus: {url}")
-        
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-        }
-        response = requests.get(url, headers=headers, timeout=15)
+        logger.info("Fetching URLhaus: %s", url.replace(auth_key, "***") if auth_key else url)
+        response = requests.get(url, headers=_headers(), timeout=REQUEST_TIMEOUT)
         response.raise_for_status()
-        
-        # The URLhaus CSV header has comment lines starting with "# "
-        # Format: # id,dateadded,url,url_status,threat,tags,urlhaus_link,reporter
-        lines = response.text.splitlines()
-        
-        # Find the non-comment (data) lines
-        data_lines = [line for line in lines if line and not line.startswith("#")]
-        
-        if not data_lines:
-            logger.warning("URLhaus: No data lines found")
-            return []
-        
-        # Find the CSV header (the last "# " comment line, starting with "id,")
-        header_line = None
-        for line in lines:
-            if line.startswith("# id"):
-                header_line = line.lstrip("# ").strip()
-                break
-        
-        if header_line is None:
-            # Fallback - default header
-            fieldnames = ["id", "dateadded", "url", "url_status", "last_online",
-                          "threat", "tags", "urlhaus_link", "reporter"]
-        else:
-            fieldnames = [h.strip() for h in header_line.split(",")]
-        
-        reader = csv.DictReader(data_lines, fieldnames=fieldnames)
-        for row in reader:
-            iocs.append(dict(row))
-        
-        logger.info(f"URLhaus: {len(iocs)} IOCs fetched")
-        return iocs
-        
-    except requests.exceptions.Timeout:
-        logger.error("URLhaus: Timeout (15s)")
+        result = _parse_commented_csv(
+            response.text,
+            [
+                "id",
+                "dateadded",
+                "url",
+                "url_status",
+                "last_online",
+                "threat",
+                "tags",
+                "urlhaus_link",
+                "reporter",
+            ],
+        )
+        logger.info("URLhaus: %d records fetched", len(result))
+        return result
+    except requests.RequestException as exc:
+        logger.error("URLhaus request failed: %s", exc)
+    except (csv.Error, ValueError, TypeError) as exc:
+        logger.error("URLhaus parse failed: %s", exc)
+    return []
+
+
+def _fetch_malwarebazaar_api(auth_key: str) -> List[Dict[str, Any]]:
+    response = requests.post(
+        FEED_URLS["malwarebazaar_api"],
+        headers={**_headers(), "Auth-Key": auth_key},
+        data={"query": "get_recent", "selector": "100"},
+        timeout=REQUEST_TIMEOUT,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    if not isinstance(payload, dict):
+        raise ValueError("unexpected JSON response")
+    status = payload.get("query_status")
+    if status == "no_results":
         return []
-    except requests.exceptions.ConnectionError:
-        logger.error("URLhaus: Connection error")
-        return []
-    except requests.exceptions.HTTPError as e:
-        logger.error(f"URLhaus: HTTP {e.response.status_code}")
-        return []
-    except csv.Error as e:
-        logger.error(f"URLhaus: CSV parse error: {str(e)}")
-        return []
-    except Exception as e:
-        logger.error(f"URLhaus: Unknown error: {str(e)}")
-        return []
+    if status != "ok":
+        raise ValueError(f"API query_status={status!r}")
+    data = payload.get("data", [])
+    if not isinstance(data, list):
+        raise ValueError("API 'data' is not a list")
+    return data
+
+
+def _fetch_malwarebazaar_legacy() -> List[Dict[str, Any]]:
+    response = requests.get(
+        FEED_URLS["malwarebazaar_legacy"], headers=_headers(), timeout=REQUEST_TIMEOUT
+    )
+    response.raise_for_status()
+    return _parse_commented_csv(
+        response.text,
+        [
+            "first_seen_utc",
+            "sha256_hash",
+            "md5_hash",
+            "sha1_hash",
+            "reporter",
+            "file_name",
+            "file_type_guess",
+            "mime_type",
+            "signature",
+            "clamav",
+            "vtpercent",
+            "imphash",
+            "ssdeep",
+            "tlsh",
+        ],
+    )
 
 
 def fetch_malwarebazaar() -> List[Dict[str, Any]]:
+    """Fetch the latest MalwareBazaar samples.
+
+    Set ABUSECH_AUTH_KEY to use the supported Community API. Without a key,
+    FAST attempts the old CSV export for backward compatibility, but that
+    endpoint is not relied upon for correctness and may be unavailable.
     """
-    Fetches malware hashes from MalwareBazaar.
-
-    Returns MD5, SHA256 hashes and related data in CSV format.
-
-    Returns:
-        List[Dict]: List of IOC data
-        On error: empty list []
-
-    Example output:
-        [
-            {
-                "first_seen_utc": "2024-01-15 10:30:00",
-                "sha256_hash": "abc123...",
-                "md5_hash": "def456...",
-                "file_name": "malware.exe",
-                "file_type": "exe",
-                "signature": "TrojanX",
-                "reporter": "abuse_ch"
-            },
-            ...
-        ]
-    """
-    url = FEED_URLs["malwarebazaar"]
-    iocs = []
-    
+    auth_key = _abusech_auth_key()
     try:
-        logger.info(f"Fetching data from MalwareBazaar: {url}")
-        
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-        }
-        response = requests.get(url, headers=headers, timeout=15)
-        response.raise_for_status()
-        
-        lines = response.text.splitlines()
-        data_lines = [line for line in lines if line and not line.startswith("#")]
-        
-        if not data_lines:
-            logger.warning("MalwareBazaar: No data lines found")
-            return []
-        
-        # Find the MalwareBazaar header from the last "# " comment line
-        header_line = None
-        for line in lines:
-            if line.startswith('# "') or line.startswith("# first_seen"):
-                header_line = line.lstrip("# ").strip()
-                break
-        
-        if header_line is None:
-            fieldnames = ["first_seen_utc", "sha256_hash", "md5_hash", "sha1_hash",
-                          "reporter", "file_name", "file_type_guess", "mime_type",
-                          "signature", "clamav", "vtpercent", "imphash", "ssdeep", "tlsh"]
+        if auth_key:
+            logger.info("Fetching MalwareBazaar via authenticated Community API")
+            result = _fetch_malwarebazaar_api(auth_key)
         else:
-            fieldnames = [h.strip().strip('"') for h in header_line.split(",")]
-        
-        reader = csv.DictReader(
-            data_lines, fieldnames=fieldnames, skipinitialspace=True
-        )
-        for row in reader:
-            # MalwareBazaar values are quoted, clean them up
-            clean_row = {
-                k: (v.strip().strip('"') if isinstance(v, str) else v)
-                for k, v in row.items()
-            }
-            iocs.append(clean_row)
-        
-        logger.info(f"MalwareBazaar: {len(iocs)} IOCs fetched")
-        return iocs
-        
-    except requests.exceptions.Timeout:
-        logger.error("MalwareBazaar: Timeout (15s)")
-        return []
-    except requests.exceptions.ConnectionError:
-        logger.error("MalwareBazaar: Connection error")
-        return []
-    except requests.exceptions.HTTPError as e:
-        logger.error(f"MalwareBazaar: HTTP {e.response.status_code}")
-        return []
-    except csv.Error as e:
-        logger.error(f"MalwareBazaar: CSV parse error: {str(e)}")
-        return []
-    except Exception as e:
-        logger.error(f"MalwareBazaar: Unknown error: {str(e)}")
-        return []
+            logger.warning(
+                "MalwareBazaar: ABUSECH_AUTH_KEY is not set; trying legacy CSV fallback. "
+                "Set a free abuse.ch Auth-Key for the supported API."
+            )
+            result = _fetch_malwarebazaar_legacy()
+        logger.info("MalwareBazaar: %d records fetched", len(result))
+        return result
+    except requests.RequestException as exc:
+        logger.error("MalwareBazaar request failed: %s", exc)
+    except (ValueError, csv.Error, TypeError) as exc:
+        logger.error("MalwareBazaar parse/API failed: %s", exc)
+    return []
 
 
 def fetch_spamhaus() -> List[Dict[str, Any]]:
-    """
-    Fetches spam/botnet IPs from the Spamhaus DROP list.
-
-    Returns IPs in plain text format.
-
-    Returns:
-        List[Dict]: List of IOC data
-        On error: empty list []
-
-    Example output:
-        [
-            {"cidr": "192.168.1.0/24", "reason": "SBL12345"},
-            ...
-        ]
-    """
-    url = FEED_URLs["spamhaus"]
-    iocs = []
-    
+    """Fetch Spamhaus DROP IPv4 ranges from the current NDJSON dataset."""
+    url = FEED_URLS["spamhaus"]
     try:
-        logger.info(f"Fetching data from Spamhaus DROP: {url}")
-        
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-        }
-        response = requests.get(url, headers=headers, timeout=15)
+        logger.info("Fetching Spamhaus DROP: %s", url)
+        response = requests.get(url, headers=_headers(), timeout=REQUEST_TIMEOUT)
         response.raise_for_status()
-        
-        lines = response.text.splitlines()
-        
-        for line in lines:
+        result: List[Dict[str, Any]] = []
+        for line in response.text.splitlines():
             line = line.strip()
-            
-            # Skip blank lines and full comment lines
-            if not line or line.startswith(";"):
+            if not line:
                 continue
-            
-            # Format: "192.168.1.0/24 ; SBL12345" or "192.168.1.0/24 ; \"REASON\""
-            if ";" in line:
-                parts = line.split(";", 1)
-                cidr = parts[0].strip()
-                reason = parts[1].strip().strip('"') if len(parts) > 1 else ""
-            else:
-                cidr = line
-                reason = ""
-            
-            if cidr:
-                iocs.append({"cidr": cidr, "reason": reason})
-        
-        logger.info(f"Spamhaus: {len(iocs)} IOCs fetched")
-        return iocs
-        
-    except requests.exceptions.Timeout:
-        logger.error("Spamhaus: Timeout (15s)")
-        return []
-    except requests.exceptions.ConnectionError:
-        logger.error("Spamhaus: Connection error")
-        return []
-    except requests.exceptions.HTTPError as e:
-        logger.error(f"Spamhaus: HTTP {e.response.status_code}")
-        return []
-    except Exception as e:
-        logger.error(f"Spamhaus: Unknown error: {str(e)}")
-        return []
+            try:
+                item = json.loads(line)
+            except json.JSONDecodeError as exc:
+                logger.warning("Spamhaus: skipping malformed JSON line: %s", exc)
+                continue
+            if not isinstance(item, dict) or not item.get("cidr"):
+                # The final metadata object contains timestamp/copyright but no CIDR.
+                continue
+            result.append(
+                {
+                    "cidr": str(item["cidr"]).strip(),
+                    "reason": str(item.get("sblid") or item.get("reason") or "").strip(),
+                }
+            )
+        logger.info("Spamhaus: %d records fetched", len(result))
+        return result
+    except requests.RequestException as exc:
+        logger.error("Spamhaus request failed: %s", exc)
+    except (ValueError, TypeError) as exc:
+        logger.error("Spamhaus parse failed: %s", exc)
+    return []
 
 
 def fetch_all_feeds() -> Dict[str, List[Dict[str, Any]]]:
-    """
-    Fetches data from all feeds sequentially.
-
-    Each feed is already error-tolerant within its own function
-    (try/except), so if one feed fails the others still continue.
-
-    Returns:
-        Dict: {feed_name: list of IOCs, ...}
-        Example: {
-            "feodo": [...],
-            "urlhaus": [...],
-            "malwarebazaar": [...],
-            "spamhaus": [...]
-        }
-    """
-    results = {}
-    
+    """Fetch every configured feed independently and return all results."""
     fetch_functions = {
         "feodo": fetch_feodo,
         "urlhaus": fetch_urlhaus,
         "malwarebazaar": fetch_malwarebazaar,
         "spamhaus": fetch_spamhaus,
     }
-    
+    results: Dict[str, List[Dict[str, Any]]] = {}
     for feed_name, fetch_func in fetch_functions.items():
         try:
-            logger.info(f"Processing feed '{feed_name}'...")
             results[feed_name] = fetch_func()
-        except Exception as e:
-            # Each fetcher already handles its own exceptions internally, but
-            # this is an extra safety layer against unexpected errors
-            logger.error(f"Feed '{feed_name}' failed with an unexpected error: {str(e)}")
+        except Exception as exc:  # final isolation boundary between providers
+            logger.exception("Unexpected failure in feed '%s': %s", feed_name, exc)
             results[feed_name] = []
-    
-    total = sum(len(v) for v in results.values())
-    logger.info(f"All feeds complete. Total: {total} IOCs")
-    
+
+    total = sum(len(items) for items in results.values())
+    failed = [name for name, items in results.items() if not items]
+    logger.info("All feeds complete: %d raw records", total)
+    if failed:
+        logger.warning("Feeds with zero records: %s", ", ".join(failed))
     return results
