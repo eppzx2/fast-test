@@ -1,123 +1,123 @@
-# Feed Mapping
+# FAST Feed Mapping
 
-Explains how data from each feed is mapped to the standard schema.
+FAST normalizes provider-specific records into one IOC schema. Provider outages
+are isolated from one another; a complete all-feed failure is treated as an
+error by the CLI/deploy path.
 
-## 1. Feodo Tracker
-
-**Feed URL:** `https://feodotracker.abuse.ch/downloads/ipblocklist.json`
-
-**Format:** JSON
-
-**Raw Structure:**
-```json
-{
-  "botnet": "dridex",
-  "ip_address": "192.168.1.1",
-  "port": "443",
-  "country_code": "RU",
-  "last_dns_query": "2024-01-15"
-}
-```
-
-**Mapping:**
-| Feodo Field | Standard Field | Note |
-|---|---|---|
-| `ip_address` | `ioc_value` | IP address |
-| - | `ioc_type` | `"ip"` |
-| - | `source_feed` | `"feodo"` |
-| `last_dns_query` | `last_seen` | Date is parsed |
-| - | `first_seen` | Same as `last_seen` |
-| `botnet` | `tags` | Botnet name as a tag |
-
----
-
-## 2. URLhaus
-
-**Feed URL:** `https://urlhaus.abuse.ch/downloads/csv_recent/`
-
-**Format:** CSV
-
-**Raw Structure:**
-```csv
-id,date_added,url,url_status,threat,reporter
-1,2024-01-15,http://evil.com/malware.exe,online,Trojan,abuse.ch
-```
-
-**Mapping:**
-| URLhaus Field | Standard Field | Note |
-|---|---|---|
-| `url` | `ioc_value` | URL address |
-| - | `ioc_type` | `"url"` |
-| - | `source_feed` | `"urlhaus"` |
-| `date_added` | `first_seen` | Date is parsed |
-| `date_added` | `last_seen` | Date is parsed |
-| `threat` | `tags` | Threat type as a tag |
-
----
-
-## 3. MalwareBazaar
-
-**Feed URL:** `https://bazaar.abuse.ch/export/csv/recent/`
-
-**Format:** CSV
-
-**Raw Structure:**
-```csv
-sha256,md5,first_submission,last_analysis,file_name
-abc123,def456,2024-01-10,2024-01-15,malware.exe
-```
-
-**Mapping:**
-| MalwareBazaar Field | Standard Field | Note |
-|---|---|---|
-| `sha256` or `md5` | `ioc_value` | Hash value |
-| - | `ioc_type` | `"hash"` |
-| - | `source_feed` | `"malwarebazaar"` |
-| `first_submission` | `first_seen` | Date is parsed |
-| `last_analysis` | `last_seen` | Date is parsed |
-| `file_name` | `tags` | File name as a tag |
-
----
-
-## 4. Spamhaus DROP
-
-**Feed URL:** `https://www.spamhaus.org/drop/drop.txt`
-
-**Format:** Plain text (one IP per line, followed by `; "REASON"`)
-
-**Raw Structure:**
-```
-; Spamhaus DROP List
-192.168.1.0/24 ; "Botnet"
-10.0.0.0/8 ; "Spam Source"
-```
-
-**Mapping:**
-| Spamhaus Field | Standard Field | Note |
-|---|---|---|
-| IP address | `ioc_value` | CIDR or plain IP |
-| - | `ioc_type` | `"ip"` |
-| - | `source_feed` | `"spamhaus"` |
-| - | `first_seen` | Current timestamp |
-| - | `last_seen` | Current timestamp |
-| Comment (`REASON`) | `tags` | Reason as a tag |
-
----
-
-## Standard Output Schema
+## Standard schema
 
 ```json
 {
-  "ioc_value": "192.168.1.1",
+  "ioc_value": "203.0.113.10",
   "ioc_type": "ip",
   "source_feed": "feodo",
-  "first_seen": "2024-01-10T10:30:00",
-  "last_seen": "2024-01-15T15:45:00",
-  "confidence_score": 75,
-  "tags": ["botnet", "dridex"]
+  "first_seen": "2026-09-06T10:30:00+00:00",
+  "last_seen": "2026-09-06T10:30:00+00:00",
+  "confidence_score": 25,
+  "tags": ["botnet-name"]
 }
 ```
 
----
+`first_seen` and `last_seen` are normalized to ISO-8601 UTC. Confidence is
+calculated from the number of distinct feeds observing the same `(ioc_value,
+ioc_type)`: 25 / 50 / 75 / 100.
 
-**Last updated:** 2026-08-07
+## Feodo Tracker
+
+Public JSON source:
+
+```text
+https://feodotracker.abuse.ch/downloads/ipblocklist.json
+```
+
+Relevant mapping:
+
+| Provider field | FAST field |
+|---|---|
+| `ip_address` | `ioc_value` |
+| — | `ioc_type = ip` |
+| — | `source_feed = feodo` |
+| `last_dns_query` or `last_online` | `first_seen`, `last_seen` |
+| `botnet`, `malware` | `tags` |
+
+Records without an IP are skipped.
+
+## URLhaus
+
+When `ABUSECH_AUTH_KEY` is configured, FAST uses the current authenticated
+Community export endpoint. The project retains the historical recent-CSV URL as
+a best-effort compatibility fallback when no key is configured.
+
+Relevant CSV fields:
+
+| Provider field | FAST field |
+|---|---|
+| `url` | `ioc_value` |
+| — | `ioc_type = url` |
+| — | `source_feed = urlhaus` |
+| `dateadded` | `first_seen`, `last_seen` |
+| `threat`, comma-separated `tags` | `tags` |
+
+## MalwareBazaar
+
+Preferred current endpoint:
+
+```text
+POST https://mb-api.abuse.ch/api/v1/
+Auth-Key: <ABUSECH_AUTH_KEY>
+query=get_recent
+selector=100
+```
+
+FAST also understands the historical CSV shape so older/local fixtures remain
+compatible.
+
+Relevant mapping:
+
+| Provider field | FAST field |
+|---|---|
+| `sha256_hash` (preferred), `md5_hash` fallback | `ioc_value` |
+| — | `ioc_type = hash` |
+| — | `source_feed = malwarebazaar` |
+| current `first_seen` or historical `first_seen_utc` | `first_seen`, `last_seen` |
+| `signature`, `file_name`, `file_type`/`file_type_guess` | `tags` |
+
+## Spamhaus DROP
+
+FAST uses the current IPv4 JSON/NDJSON DROP dataset:
+
+```text
+https://www.spamhaus.org/drop/drop_v4.json
+```
+
+Relevant mapping:
+
+| Provider field | FAST field |
+|---|---|
+| `cidr` | `ioc_value` |
+| — | `ioc_type = ip` |
+| — | `source_feed = spamhaus` |
+| collection time | `first_seen`, `last_seen` |
+| `sblid` (or compatible `reason`) | `tags` |
+
+Metadata objects without `cidr` and malformed JSON lines are skipped.
+
+## Deduplication semantics
+
+For repeated `(ioc_value, ioc_type)` observations, FAST:
+
+- keeps one SQLite row;
+- unions distinct provider names;
+- unions tags without duplicates;
+- keeps the earliest `first_seen`;
+- keeps the latest `last_seen`;
+- recalculates confidence from distinct feed count.
+
+## Wazuh CDB subset
+
+The Wazuh CDB list intentionally contains only **validated IPv4/IPv4-CIDR** IOC
+values. URL/hash IOCs remain in the FAST database/dashboard but are not written
+to `sample_output/ioc-ips`. Invalid values and IPv6 are skipped, and CIDRs are
+canonicalized before export.
+
+**Last updated:** 2026-09-06
