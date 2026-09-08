@@ -2,7 +2,7 @@ name: FAST CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, feature/fast-ui]
   pull_request:
 
 permissions:
@@ -31,6 +31,7 @@ jobs:
       - name: Shell syntax
         run: |
           bash -n deploy.sh
+          bash -n deploy-fast-ui.sh
           bash -n bin/fast
           bash -n refresh_iocs.sh
           bash -n linux/install-wazuh-agent.sh
