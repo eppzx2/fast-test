@@ -17,6 +17,10 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+_configured_db_path = os.getenv("FAST_DB_PATH", "").strip()
+if _configured_db_path:
+    db.DB_PATH = _configured_db_path
+
 DETECTIONS = [
     {
         "id": "100200",
@@ -92,6 +96,8 @@ def ui_config():
             "product_name": "FAST",
             "product_subtitle": "Fully Automated SIEM & Threat Intelligence Platform",
             "wazuh_dashboard_url": os.getenv("FAST_WAZUH_DASHBOARD_URL", "").strip(),
+            "public_url": os.getenv("FAST_PUBLIC_URL", "").strip(),
+            "deployment_mode": os.getenv("FAST_DEPLOYMENT_MODE", "local").strip() or "local",
         }
     )
 
