@@ -37,6 +37,8 @@ def test_fetch_returns_503_when_all_feeds_are_empty(tmp_path, monkeypatch):
 
 def test_ui_config_exposes_only_non_secret_dashboard_configuration(tmp_path, monkeypatch):
     monkeypatch.setenv("FAST_WAZUH_DASHBOARD_URL", "https://100.64.0.10")
+    monkeypatch.setenv("FAST_PUBLIC_URL", "https://fast-demo.example.ts.net")
+    monkeypatch.setenv("FAST_DEPLOYMENT_MODE", "tailscale-funnel")
     monkeypatch.setenv("ABUSECH_AUTH_KEY", "must-not-leak")
     client = _client(tmp_path, monkeypatch)
 
@@ -45,6 +47,8 @@ def test_ui_config_exposes_only_non_secret_dashboard_configuration(tmp_path, mon
     payload = response.get_json()
     assert payload["product_name"] == "FAST"
     assert payload["wazuh_dashboard_url"] == "https://100.64.0.10"
+    assert payload["public_url"] == "https://fast-demo.example.ts.net"
+    assert payload["deployment_mode"] == "tailscale-funnel"
     assert "ABUSECH_AUTH_KEY" not in payload
     assert "must-not-leak" not in response.get_data(as_text=True)
 
