@@ -42,20 +42,17 @@
 -->
 
 <!-- ============================================================
-     SSH BRUTE FORCE
+     SSH FAILED AUTHENTICATION
      Wazuh v4.9 rule 5760 is the concrete failed-password SSH rule:
        <if_sid>5700,5716</if_sid>
        <match>Failed password|Failed keyboard|authentication error</match>
-     The live FAST target also confirms that each simulated password
-     failure lands on rule 5760. Correlate that exact rule instead of a
-     broad group + decoder condition; this mirrors Wazuh's own 5763
-     brute-force correlation while using FAST's 5/60s threshold.
+     FAST promotes that base event to its own rule ID so Threat Hunting
+     shows rule 100200 for the SSH failed-authentication detection.
      ============================================================ -->
 <group name="local,ssh_brute_force,">
-  <rule id="100200" level="10" frequency="5" timeframe="60">
-    <if_matched_sid>5760</if_matched_sid>
-    <same_source_ip />
-    <description>FAST SSH brute force: 5 failed password authentications from the same source IP ($(srcip)) within 60 seconds.</description>
+  <rule id="100200" level="10">
+    <if_sid>5760</if_sid>
+    <description>FAST SSH failed authentication detected from source IP ($(srcip)).</description>
     <mitre>
       <id>T1110</id>
     </mitre>
