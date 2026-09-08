@@ -8,8 +8,8 @@ a connected Wazuh agent.
 - **Manager** — runs the FAST/Wazuh Docker stack and Threat Hunting.
 - **Target** — Linux VM being exercised; Wazuh agent must be Active.
 - **Runner** — machine that sends SSH/port probes. It can be the Manager.
-- LOLBin is different: its simulator must run **on the Target** because auditd
-  observes local process execution.
+- **LOLBin** is different: its simulator must run **on the Target** because
+  auditd observes local process execution.
 
 A Windows host agent can remain connected for normal Wazuh testing, but these
 three simulations are Linux-specific.
@@ -28,7 +28,7 @@ Expected core status:
 ```text
 Wazuh Manager health (current start only): healthy
 Filebeat -> Indexer alert pipeline: healthy
-FAST [ HEALTHY ]
+FAST                 [ HEALTHY ]
 ```
 
 ## 2. Prepare the Linux Target once
@@ -57,7 +57,7 @@ Confirm the target is Active from the Manager:
 docker exec single-node-wazuh.manager-1 /var/ossec/bin/agent_control -l
 ```
 
-## 3. SSH brute-force test
+## 3. SSH failed-authentication stress test
 
 On the Runner:
 
@@ -66,16 +66,22 @@ sudo apt-get install -y sshpass   # only if missing
 ./tests/acceptance/sim/simulate_brute_force.sh <TARGET_IP> nonexistent_bruteforce_test_user 8
 ```
 
-The script counts only attempts that reached a verifiable authentication
-rejection. It sleeps between attempts to reduce OpenSSH per-source penalty
-interference.
+The simulator sends repeated wrong-password SSH attempts and counts only
+attempts that really reached a verifiable authentication rejection. Transport
+errors and timeouts are not silently counted as success. It also sleeps between
+attempts to reduce OpenSSH per-source penalty interference.
 
-Expected Threat Hunting chain:
+Current detection behavior:
 
 ```text
 5760    sshd: authentication failed
-100200  FAST SSH brute force ...            level 10
+100200  FAST SSH failed authentication detected from source IP (...)   level 10
 ```
+
+`100200` is a same-event child of Wazuh rule `5760` using `<if_sid>5760</if_sid>`.
+It is **not** currently a 5-events/60-seconds correlation rule. The simulator
+still requires at least five real authentication failures so the repeated-attack
+scenario is meaningful and transport failures are caught.
 
 ## 4. Port-scan test
 
@@ -85,8 +91,9 @@ On the Runner:
 ./tests/acceptance/sim/simulate_port_scan.sh <TARGET_IP>
 ```
 
-If root + nmap are available it uses a SYN scan; otherwise it uses TCP connect
-or `/dev/tcp` fallback against the reserved FAST ports.
+If root + nmap are available it uses a SYN scan. Without root it uses an nmap
+TCP connect scan. If nmap is unavailable, it falls back to `/dev/tcp` probes.
+All paths target the reserved FAST ports `56001..56012`.
 
 Expected Threat Hunting chain:
 
@@ -94,6 +101,9 @@ Expected Threat Hunting chain:
 100210  FAST port-scan probe observed ...   level 3
 100211  FAST possible port scan ...         level 7
 ```
+
+`100211` is the actual correlation rule: it fires after 8+ `100210` probe events
+from the same source IP within 60 seconds.
 
 Target-side confirmation:
 
@@ -111,16 +121,16 @@ git pull
 ./tests/acceptance/sim/simulate_lolbin.sh
 ```
 
-The script copies `wget` to `/tmp/httpd`, executes it with wget-style arguments
-against loopback, waits for auditd to flush, and removes its temporary files.
-It does not need Internet access.
+The script copies the local `wget` binary to `/tmp/httpd`, executes it with
+wget-style arguments against loopback, waits briefly for audit/log collection,
+and removes its temporary files. It does not require Internet access.
 
 Expected Threat Hunting chain:
 
 ```text
 80792   Audit command
-100220  non-standard process presenting as httpd
-100221  LOLBin confirmed ...                level 12
+100220  process presenting as httpd from a non-standard path   level 6
+100221  LOLBin confirmed with wget-style arguments             level 12
 ```
 
 Target prerequisites can be checked directly:
@@ -138,24 +148,32 @@ Run from the Manager/repository checkout:
 ```bash
 export TARGET_HOST=<TARGET_IP>
 export TARGET_SSH_USER=<TARGET_USER>
-pytest tests/acceptance -v
+python -m pytest tests/acceptance -v
 ```
 
-The suite only considers alerts written after each test starts. Missing
-`TARGET_HOST` or an unavailable Manager causes a skip instead of contaminating
-the normal offline unit suite.
+The acceptance suite is a live-environment suite. It snapshots the current
+Manager `alerts.json` line count before a simulation and only considers alerts
+appended after that point. If the Manager is unavailable, or required target
+environment variables are missing, tests skip rather than contaminating the
+offline unit suite.
+
+The normal GitHub Actions workflow intentionally runs only deterministic offline
+checks and excludes `tests/acceptance`.
 
 ## Troubleshooting matrix
 
 | Symptom | Check |
 |---|---|
 | No SSH base alert | target `journalctl -u ssh`; agent Active; journald collection |
-| `5760` but no `100200` | deployed `local_rules.xml`; `wazuh-analysisd -t` |
+| `5760` but no `100200` | deployed rule `100200` must use `<if_sid>5760</if_sid>`; run `wazuh-analysisd -t` |
+| SSH simulator reports fewer than 5 real failures | check target password-auth path and OpenSSH per-source penalties |
 | No port-scan marker | rerun `setup_prereqs.sh`; inspect `iptables -t mangle -S PREROUTING` |
-| `100210` but no `100211` | confirm 8+ probes from same `srcip` inside 60 seconds |
+| `100210` but no `100211` | confirm 8+ probes from the same `srcip` inside 60 seconds |
 | LOLBin simulator preflight fails | auditd active; audit key; agent audit.log collection |
 | `80792` but no `100220` | inspect decoded `audit.command` and `audit.exe` |
 | `100220` but no `100221` | inspect EXECVE/raw audit arguments for URL / `-O` evidence |
 | Manager has alerts but Threat Hunting is empty | `./bin/fast status`; Filebeat → Indexer must be healthy |
 
 For rule design details, see `docs/runbook.md`.
+
+**Last updated:** 2026-09-08
