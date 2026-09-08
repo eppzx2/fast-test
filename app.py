@@ -3,9 +3,12 @@
 import logging
 import os
 
+from dotenv import load_dotenv
 from flask import Flask, jsonify, render_template, request, send_file
 
 from core import db, exporter, fetchers, normalizer
+
+load_dotenv()
 
 app = Flask(__name__)
 logging.basicConfig(
@@ -13,6 +16,33 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
 logger = logging.getLogger(__name__)
+
+DETECTIONS = [
+    {
+        "id": "100200",
+        "name": "SSH Failed Authentication",
+        "level": 10,
+        "mitre": ["T1110"],
+        "description": "Promotes Wazuh rule 5760 failed SSH authentication events into the FAST detection namespace.",
+        "status": "enabled",
+    },
+    {
+        "id": "100211",
+        "name": "Port Scan",
+        "level": 7,
+        "mitre": ["T1046"],
+        "description": "Correlates 8 or more FAST_PORTSCAN probes from the same source IP within 60 seconds.",
+        "status": "enabled",
+    },
+    {
+        "id": "100221",
+        "name": "LOLBin / Masquerading",
+        "level": 12,
+        "mitre": ["T1036.003", "T1105"],
+        "description": "Confirms a process presenting as httpd from a non-standard path with wget-style command-line evidence.",
+        "status": "enabled",
+    },
+]
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -39,13 +69,37 @@ def index():
 
 @app.route("/api/health")
 def health():
-    """Cheap liveness endpoint used by Docker health checks."""
+    """Cheap liveness endpoint used by Docker health checks and the FAST UI."""
     try:
         db.init_database()
-        return jsonify({"status": "ok", "ioc_count": db.get_count()})
+        return jsonify(
+            {
+                "status": "ok",
+                "service": "fast-ioc-collector-web",
+                "ioc_count": db.get_count(),
+            }
+        )
     except Exception as exc:
         logger.error("/api/health error: %s", exc)
         return jsonify({"status": "error"}), 503
+
+
+@app.route("/api/ui-config")
+def ui_config():
+    """Return non-secret UI configuration only."""
+    return jsonify(
+        {
+            "product_name": "FAST",
+            "product_subtitle": "Fully Automated SIEM & Threat Intelligence Platform",
+            "wazuh_dashboard_url": os.getenv("FAST_WAZUH_DASHBOARD_URL", "").strip(),
+        }
+    )
+
+
+@app.route("/api/detections")
+def detections():
+    """Expose the stable FAST detection catalogue for UI presentation."""
+    return jsonify({"items": DETECTIONS, "total": len(DETECTIONS)})
 
 
 @app.route("/api/iocs")
@@ -53,8 +107,9 @@ def get_iocs():
     try:
         page = max(1, int(request.args.get("page", 1)))
         per_page = min(200, max(1, int(request.args.get("per_page", 50))))
+        min_score = max(0, min(100, int(request.args.get("min_score", 0))))
     except (TypeError, ValueError):
-        page, per_page = 1, 50
+        page, per_page, min_score = 1, 50, 0
 
     type_filter = request.args.get("type", "").strip()
     feed_filter = request.args.get("feed", "").strip()
@@ -72,6 +127,12 @@ def get_iocs():
             item
             for item in all_iocs
             if search in str(item.get("ioc_value", "")).lower()
+        ]
+    if min_score:
+        all_iocs = [
+            item
+            for item in all_iocs
+            if int(item.get("confidence_score", 0) or 0) >= min_score
         ]
 
     total = len(all_iocs)
@@ -135,7 +196,7 @@ def export_iocs():
     fmt = request.args.get("format", "csv").lower()
     iocs = db.get_all_iocs()
     if not iocs:
-        return jsonify({"status": "error", "message": "Bazada IOC yoxdur"}), 400
+        return jsonify({"status": "error", "message": "No IOCs found in the database"}), 400
 
     if fmt == "csv":
         ok = exporter.export_to_csv(iocs)
@@ -146,10 +207,10 @@ def export_iocs():
         filepath = os.path.join(exporter.EXPORT_DIR, "ioc_export.json")
         mimetype = "application/json"
     else:
-        return jsonify({"status": "error", "message": f"Naməlum format: {fmt}"}), 400
+        return jsonify({"status": "error", "message": f"Unknown format: {fmt}"}), 400
 
     if not ok or not os.path.exists(filepath):
-        return jsonify({"status": "error", "message": "Export uğursuz oldu"}), 500
+        return jsonify({"status": "error", "message": "Export failed"}), 500
     return send_file(filepath, mimetype=mimetype, as_attachment=True)
 
 
