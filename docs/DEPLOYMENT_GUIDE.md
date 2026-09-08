@@ -1,7 +1,8 @@
 # F.A.S.T. — Deployment Guide
 
 This guide covers a clean FAST deployment: Wazuh Manager/Indexer/Dashboard,
-IOC collection, the FAST web dashboard, and Linux/Windows agents.
+IOC collection, the FAST web dashboard, Linux/Windows agents, health checks,
+and the Linux detection test prerequisites.
 
 ## Recommended topology
 
@@ -51,8 +52,8 @@ git clone <this-repo-url> fast-test
 cd fast-test
 ```
 
-Threat feeds work independently. For the **supported current URLhaus and
-MalwareBazaar Community APIs**, configure a free abuse.ch Auth-Key locally:
+Threat feeds are fetched independently. For the supported current URLhaus and
+MalwareBazaar Community APIs, configure a free abuse.ch Auth-Key locally:
 
 ```bash
 cp .env.example .env
@@ -60,8 +61,8 @@ cp .env.example .env
 # ABUSECH_AUTH_KEY=<your-key>
 ```
 
-`.env` is ignored by git. Without the key, FAST retains legacy compatibility
-fallbacks where possible, but MalwareBazaar's supported API requires the key.
+`.env` is ignored by git. Without the key, FAST keeps legacy compatibility
+fallbacks where possible, but the supported MalwareBazaar API requires the key.
 
 The FAST web dashboard binds to `127.0.0.1:5000` by default. To intentionally
 expose it on a Tailscale interface, set this in `.env`:
@@ -91,14 +92,15 @@ The deployment:
 3. automatically deletes/regenerates a stale, incomplete, or mixed certificate
    set while preserving named data volumes;
 4. starts Manager/Indexer/Dashboard;
-5. verifies Manager processes/current-start logs;
-6. builds the IOC Collector;
-7. fetches, normalizes, deduplicates and scores IOCs;
+5. verifies Manager processes and current-start logs;
+6. builds the IOC Collector image;
+7. fetches, normalizes, deduplicates, scores, and stores IOCs;
 8. validates the IPv4/CIDR Wazuh CDB export;
-9. installs the CDB + FAST rules and runs `wazuh-analysisd -t`;
-10. restarts the Manager once;
-11. verifies Filebeat can securely publish to the Wazuh Indexer before reporting
-    deployment success.
+9. installs the CDB list and FAST custom rules;
+10. runs `wazuh-analysisd -t` before the final Manager restart;
+11. verifies Manager health after restart;
+12. verifies Filebeat can securely publish alerts to the Wazuh Indexer before
+    reporting deployment success.
 
 If you explicitly want to discard the current TLS files and regenerate them:
 
@@ -107,6 +109,12 @@ If you explicitly want to discard the current TLS files and regenerate them:
 ```
 
 This does **not** delete named Wazuh/Indexer data volumes.
+
+For an offline/demo IOC seed using the bundled fixture instead of live feeds:
+
+```bash
+./bin/fast demo
+```
 
 ## 4. Verify health
 
@@ -122,11 +130,15 @@ Filebeat -> Indexer alert pipeline: healthy
 FAST                 [ HEALTHY ]
 ```
 
+`HEALTHY` requires the Manager, Indexer, and Dashboard containers to be running,
+Manager analysis processes to be healthy, and the Filebeat → Indexer alert path
+to pass its output test.
+
 If Filebeat → Indexer is unhealthy, Threat Hunting can be empty even while the
-Manager itself is generating alerts. FAST status deliberately treats that as
+Manager itself is generating alerts. FAST deliberately reports that state as
 `DEGRADED`.
 
-## 5. Dashboard
+## 5. Wazuh Dashboard
 
 Open:
 
@@ -145,7 +157,7 @@ Change default credentials and restrict access before production/internet use.
 The generated certificates are local/self-signed, so a browser trust warning is
 normal in a lab deployment.
 
-## 6. FAST web dashboard
+## 6. FAST IOC web dashboard
 
 When started through `./bin/fast up`, it runs as the
 `fast-ioc-collector-web` container.
@@ -187,8 +199,8 @@ Optional name:
 sudo ./linux/install-wazuh-agent.sh --ip <MANAGER_TAILSCALE_IP> --name my-linux-target
 ```
 
-The installer checks 1514/1515 reachability, installs Wazuh Agent 4.9.0,
-starts the service, and reports recent connection logs.
+The installer checks Manager reachability, installs Wazuh Agent 4.9.0, starts
+the service, and reports recent connection logs.
 
 ## 8. Connect a Windows endpoint
 
@@ -216,10 +228,10 @@ docker exec single-node-wazuh.manager-1 /var/ossec/bin/agent_control -l
 
 Agents should show `Active`.
 
-## 9. Prepare a Linux target for FAST attack simulations
+## 9. Prepare a Linux target for FAST detection simulations
 
-The SSH brute-force, port-scan, and LOLBin simulations are Linux-oriented.
-Run once on the **Linux target**:
+The SSH failed-authentication stress test, port-scan test, and LOLBin test are
+Linux-oriented. Run once on the **Linux target**:
 
 ```bash
 cd ~/fast-test
@@ -230,14 +242,29 @@ sudo ./tests/acceptance/sim/setup_prereqs.sh
 The setup:
 
 - ensures OpenSSH is running;
-- ensures journald collection;
-- installs a **logging-only** pre-filter `FAST_PORTSCAN` rule for reserved test
-  ports without changing firewall ACCEPT/DROP policy;
+- ensures the Wazuh agent collects journald;
+- installs a **logging-only** `mangle/PREROUTING` rule for FAST test ports
+  `56001..56012` with the `FAST_PORTSCAN` marker;
+- does not add ACCEPT/DROP policy and does not enable UFW;
 - installs/enables auditd and watches `execve` with key `audit-wazuh-c`;
-- ensures the Wazuh agent collects `/var/log/audit/audit.log`;
+- ensures the Wazuh agent collects `/var/log/audit/audit.log` using audit format;
+- backs up the agent config once before modifying it;
 - restarts the agent only when its collection config changes.
 
-It does **not** enable UFW or add firewall blocking policy.
+Current detection IDs:
+
+```text
+SSH failed authentication:  Wazuh 5760 -> FAST 100200 (level 10)
+Port-scan probe:            Wazuh 4100 -> FAST 100210 (level 3)
+Port-scan correlation:      FAST 100210 -> FAST 100211 (level 7, 8+ probes/60s)
+LOLBin signal:              Wazuh 80792 -> FAST 100220 (level 6)
+LOLBin confirmation:        FAST 100220 -> FAST 100221 (level 12)
+```
+
+Important: `100200` is currently a **same-event child** of Wazuh rule `5760`.
+The brute-force simulator still sends multiple verified failed-password attempts
+as a repeatable stress scenario, but FAST `100200` itself is no longer a
+5-events-in-60-seconds correlation rule.
 
 Simulation details: `docs/SIMULATION_GUIDE.md`.
 
@@ -297,6 +324,15 @@ docker exec single-node-wazuh.manager-1 \
   sh -c 'wc -l /var/ossec/logs/alerts/alerts.json; tail -n 10 /var/ossec/logs/alerts/alerts.json'
 ```
 
+### SSH base alert appears but FAST `100200` does not
+
+Confirm the deployed custom rule file contains `100200` with `<if_sid>5760</if_sid>`
+and validate the Manager configuration:
+
+```bash
+docker exec single-node-wazuh.manager-1 /var/ossec/bin/wazuh-analysisd -t
+```
+
 ### Agent not Active
 
 Linux target:
@@ -332,3 +368,5 @@ rm -rf wazuh-docker
 
 For most clean re-tests, `./bin/fast up --reset-certs` is enough and preserves
 data.
+
+**Last updated:** 2026-09-08
