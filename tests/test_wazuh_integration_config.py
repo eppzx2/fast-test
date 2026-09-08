@@ -46,16 +46,20 @@ def test_frequency_context_rules_use_if_matched():
             )
 
 
-def test_ssh_bruteforce_rule_correlates_wazuh_5760():
+def test_ssh_failed_auth_rule_promotes_wazuh_5760_to_fast_100200():
     rules_by_id = {rule.attrib["id"]: rule for rule in _rules()}
     rule = rules_by_id["100200"]
 
-    assert rule.findtext("if_matched_sid") == "5760"
-    assert rule.find("same_source_ip") is not None
-    assert rule.attrib["frequency"] == "5"
-    assert rule.attrib["timeframe"] == "60"
+    assert rule.findtext("if_sid") == "5760"
+    assert rule.find("if_matched_sid") is None
     assert rule.find("if_matched_group") is None
-    assert rule.find("decoded_as") is None
+    assert rule.find("same_source_ip") is None
+    assert "frequency" not in rule.attrib
+    assert "timeframe" not in rule.attrib
+    assert rule.attrib["level"] == "10"
+    assert rule.findtext("description") == (
+        "FAST SSH failed authentication detected from source IP ($(srcip))."
+    )
 
 
 def test_portscan_rule_uses_deterministic_fast_kernel_marker():
