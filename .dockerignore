@@ -1,0 +1,16 @@
+.git
+.gitignore
+.env
+.env.*
+!.env.example
+.venv
+__pycache__
+.pytest_cache
+*.pyc
+*.pyo
+*.db
+*.sqlite
+*.sqlite3
+sample_output/
+wazuh-docker/
+.fast-ui-preview/
