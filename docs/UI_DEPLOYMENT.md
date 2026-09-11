@@ -1,169 +1,145 @@
-# FAST UI Deployment (feature/fast-ui)
+# FAST UI and Tailscale access (feature/fast-ui)
 
-This guide deploys the UI development branch without changing the existing
-`main` FAST/Wazuh deployment.
+This branch uses one FAST deployment. The UI is started by the normal FAST
+command together with the Wazuh stack; there is no separate preview deployment.
 
-## Goal
+## 1. Deploy FAST
 
-The preview runs in its own Docker container on `127.0.0.1:5001` and is exposed
-through **Tailscale Funnel** as a public HTTPS URL. The IOC database used by the
-preview is a copy, not the live `main` database.
+```bash
+./bin/fast up
+```
+
+This starts and verifies:
+
+- Wazuh Manager
+- Wazuh Indexer
+- Wazuh Dashboard
+- Filebeat -> Indexer alert delivery
+- IOC collection/database
+- FAST web UI
+
+Local endpoints are:
 
 ```text
-Teacher/browser
-      |
-      | public HTTPS
-      v
+FAST UI:         http://127.0.0.1:5000
+Wazuh Dashboard: https://127.0.0.1:5601
+```
+
+The Wazuh Dashboard is intentionally bound only to localhost. The official
+Wazuh Docker compose file normally publishes the Dashboard on host port 443,
+but FAST overrides that mapping. This prevents a collision with Tailscale
+Funnel, which uses HTTPS 443 for the public FAST UI.
+
+## 2. Share the UI
+
+After `./bin/fast up` is healthy, run:
+
+```bash
+./bin/fast-share
+```
+
+The helper configures two different Tailscale surfaces:
+
+```text
+Internet
+   |
+   | Tailscale Funnel / HTTPS 443
+   v
 https://<node>.<tailnet>.ts.net
-      |
-      | Tailscale Funnel
-      v
-127.0.0.1:5001
-      |
-      v
-fast-ui-preview container
-      |
-      v
-preview IOC database copy
+   |
+   v
+127.0.0.1:5000  -> FAST UI
+
+Tailnet devices only
+   |
+   | Tailscale Serve / HTTPS 8443
+   v
+https://<node>.<tailnet>.ts.net:8443
+   |
+   v
+127.0.0.1:5601  -> Wazuh Dashboard
 ```
 
-The existing Wazuh stack and the normal `~/fast-test` deployment continue to
-run independently.
+This separation is intentional. The FAST presentation UI can be public, while
+the Wazuh administration interface is not exposed to the public internet.
 
-## First-time checkout
-
-On the Cloud Ubuntu host:
-
-```bash
-cd ~
-git clone --branch feature/fast-ui --single-branch \
-  https://github.com/eppzx2/fast-test.git fast-test-ui
-cd ~/fast-test-ui
-```
-
-If this checkout already exists:
-
-```bash
-cd ~/fast-test-ui
-git pull --ff-only origin feature/fast-ui
-```
-
-## Deploy
-
-Run one command:
-
-```bash
-./deploy-fast-ui.sh
-```
-
-The script:
-
-1. safely updates `feature/fast-ui` when there are no tracked local changes;
-2. checks Docker and Tailscale;
-3. copies the current IOC database into an isolated preview data directory;
-4. builds the dedicated `docker/fast-ui.Dockerfile` image;
-5. starts `fast-ui-preview` bound only to `127.0.0.1:5001`;
-6. waits for `/api/health` to become healthy;
-7. enables Tailscale Funnel in the background;
-8. prints the public HTTPS URL.
-
-Typical output ends with:
+Typical output:
 
 ```text
-FAST UI DEPLOYED
-Public URL:      https://your-node.your-tailnet.ts.net
-Local backend:   http://127.0.0.1:5001
-Wazuh button:    https://100.x.y.z
+FAST ACCESS READY
+Public FAST UI:    https://kali.example-tailnet.ts.net
+Wazuh Dashboard:   https://kali.example-tailnet.ts.net:8443  (tailnet only)
+Local FAST UI:     http://127.0.0.1:5000
+Local Wazuh:       https://127.0.0.1:5601
 ```
 
-Anyone with the public URL can open the FAST UI without installing Tailscale.
-The `Open Wazuh Dashboard` button uses the Manager's Tailscale address by
-default, so that button is only usable from a device that can reach the tailnet
-unless another Wazuh URL is explicitly configured.
+Anyone with the Public FAST UI URL can open the FAST dashboard. A device must be
+connected to the same tailnet to use the Wazuh Dashboard link.
 
-## Existing IOC data
+## Open Wazuh button
 
-By default, the script looks for:
+The FAST UI derives the Wazuh URL automatically:
 
-```text
-~/fast-test/ioc_database.db
-```
+- when the FAST UI is opened locally, the button points to
+  `https://localhost:5601`;
+- when the FAST UI is opened through its `*.ts.net` Funnel URL, the button
+  points to the same Tailscale hostname on port `8443`.
 
-and copies it to:
+Therefore `Open Wazuh` works through the tailnet-only Tailscale Serve endpoint
+without exposing Wazuh publicly. `FAST_WAZUH_DASHBOARD_URL` can still be set in
+`.env` if an explicit URL is required.
 
-```text
-~/.local/share/fast-ui-preview/ioc_database.db
-```
+## Sharing controls
 
-This prevents UI testing or the `Refresh Threat Intelligence` button from
-changing the live `main` database.
-
-To seed the preview from another database:
+Show the current configuration:
 
 ```bash
-FAST_UI_DB_SOURCE=/path/to/ioc_database.db ./deploy-fast-ui.sh
+./bin/fast-share status
 ```
 
-## Wazuh Dashboard button
-
-The script automatically points the button at:
-
-```text
-https://<cloud-ubuntu-tailscale-ip>
-```
-
-To override it:
+Disable only the FAST sharing endpoints:
 
 ```bash
-FAST_WAZUH_DASHBOARD_URL=https://your-wazuh-address ./deploy-fast-ui.sh
+./bin/fast-share off
 ```
 
-## Port override
-
-Port `5001` is used so the existing FAST web container on `5000` is not touched.
-To use another local port:
+Enable them again:
 
 ```bash
-FAST_UI_PORT=5010 ./deploy-fast-ui.sh
+./bin/fast-share on
 ```
 
-## Troubleshooting
+The helper does not run a global `tailscale funnel reset`, so unrelated
+Tailscale routes on the machine are not intentionally removed.
 
-### Funnel is not enabled
+## Existing/stale preview cleanup
 
-Tailscale Funnel may need to be allowed for the tailnet. The deploy script keeps
-the preview container running even if Funnel setup fails. After enabling Funnel,
-rerun:
+Older UI development versions used a separate `fast-ui-preview` container on
+port 5001. It is no longer part of the final deployment model. If that old
+container still exists locally, it can be removed once:
 
 ```bash
-./deploy-fast-ui.sh
+docker rm -f fast-ui-preview 2>/dev/null || true
 ```
 
-### Check the preview container
+Running `./bin/fast-share` replaces the FAST Funnel mapping on HTTPS 443 with
+the current UI backend on port 5000.
 
-```bash
-docker ps --filter name=fast-ui-preview
-docker logs --tail 100 fast-ui-preview
-```
+## Tailscale requirements
 
-### Check Funnel
-
-```bash
-tailscale funnel status
-```
-
-### Stop only the UI preview
-
-```bash
-docker rm -f fast-ui-preview
-```
-
-If desired, disable the Funnel mapping separately using the Tailscale CLI. Do
-not run a global Funnel reset when other Funnel routes are in use.
+Tailscale Funnel requires MagicDNS, HTTPS certificates, and permission to use
+Funnel in the tailnet. The sharing helper checks that Tailscale is connected and
+that both local backends are reachable before changing the routes.
 
 ## Security boundary
 
-The public UI container is intentionally **not** given the Docker socket and it
-cannot run `./bin/fast up`, restart Wazuh, remove volumes, or change host-level
-services. This keeps the public presentation UI separate from privileged FAST
-administration while the feature is under development.
+The public FAST UI container does not receive the Docker socket and cannot run
+host-level deployment commands. Wazuh remains behind Tailscale Serve and is not
+published with Funnel. Deployment stays terminal-controlled through:
+
+```bash
+./bin/fast up
+```
+
+This keeps the public presentation surface separate from privileged SIEM
+administration.
