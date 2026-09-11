@@ -31,8 +31,8 @@ jobs:
       - name: Shell syntax
         run: |
           bash -n deploy.sh
-          bash -n deploy-fast-ui.sh
           bash -n bin/fast
+          bash -n bin/fast-share
           bash -n refresh_iocs.sh
           bash -n linux/install-wazuh-agent.sh
           for script in tests/acceptance/sim/*.sh; do bash -n "$script"; done
