@@ -1,0 +1,141 @@
+#!/usr/bin/env bash
+# ============================================================
+# FAST - Tailscale access helper
+# ============================================================
+# Public FAST UI:       Tailscale Funnel on HTTPS 443 -> 127.0.0.1:5000
+# Private Wazuh admin:  Tailscale Serve  on HTTPS 8443 -> 127.0.0.1:5601
+#
+# The Wazuh Dashboard is deliberately NOT exposed with Funnel. It stays
+# tailnet-only while the presentation UI can be opened by anyone with the
+# public Funnel URL.
+#
+# Usage:
+#   ./bin/fast-share          # same as: ./bin/fast-share on
+#   ./bin/fast-share on
+#   ./bin/fast-share status
+#   ./bin/fast-share off
+# ============================================================
+
+set -Eeuo pipefail
+
+UI_PORT="${FAST_UI_PORT:-5000}"
+WAZUH_PORT="${FAST_WAZUH_DASHBOARD_LOCAL_PORT:-5601}"
+
+fail() {
+    printf '[FAST SHARE] ERROR: %s\n' "$*" >&2
+    exit 1
+}
+
+info() {
+    printf '[FAST SHARE] %s\n' "$*"
+}
+
+require_tools() {
+    command -v tailscale >/dev/null 2>&1 || fail "Tailscale is not installed."
+    command -v curl >/dev/null 2>&1 || fail "curl is required."
+    command -v python3 >/dev/null 2>&1 || fail "python3 is required."
+
+    if ! tailscale ip -4 >/dev/null 2>&1; then
+        fail "Tailscale is not connected. Run 'sudo tailscale up' first."
+    fi
+}
+
+# Tailscale can be configured either by the current operator user or by root,
+# depending on how the node was installed. Try the normal CLI first and fall
+# back to sudo without changing any unrelated Serve/Funnel ports.
+ts_write() {
+    if tailscale "$@"; then
+        return 0
+    fi
+    if command -v sudo >/dev/null 2>&1; then
+        sudo tailscale "$@"
+        return $?
+    fi
+    return 1
+}
+
+dns_name() {
+    tailscale status --json 2>/dev/null | python3 -c '
+import json, sys
+obj = json.load(sys.stdin)
+print(((obj.get("Self") or {}).get("DNSName") or "").rstrip("."))
+'
+}
+
+check_backends() {
+    info "Checking local FAST UI..."
+    curl -fsS --max-time 5 "http://127.0.0.1:${UI_PORT}/api/health" >/dev/null \
+        || fail "FAST UI is not healthy on 127.0.0.1:${UI_PORT}. Run './bin/fast up' first."
+
+    info "Checking local Wazuh Dashboard..."
+    curl -kfsS --max-time 8 "https://127.0.0.1:${WAZUH_PORT}/" >/dev/null \
+        || fail "Wazuh Dashboard is not reachable on 127.0.0.1:${WAZUH_PORT}. Run './bin/fast up' first."
+}
+
+share_on() {
+    require_tools
+    check_backends
+
+    local dns
+    dns="$(dns_name)"
+    [ -n "$dns" ] || fail "Could not determine this node's Tailscale DNS name."
+
+    info "Publishing FAST UI with Tailscale Funnel on HTTPS 443..."
+    ts_write funnel --bg --yes --https=443 "http://127.0.0.1:${UI_PORT}" \
+        || fail "Could not enable Funnel. Check MagicDNS/HTTPS/Funnel permissions in the tailnet."
+
+    info "Publishing Wazuh Dashboard inside the tailnet on HTTPS 8443..."
+    ts_write serve --bg --yes --https=8443 "https+insecure://127.0.0.1:${WAZUH_PORT}" \
+        || fail "Could not enable tailnet-only Wazuh Serve endpoint."
+
+    printf '\n'
+    printf '============================================================\n'
+    printf ' FAST ACCESS READY\n'
+    printf '============================================================\n'
+    printf ' Public FAST UI:    https://%s\n' "$dns"
+    printf ' Wazuh Dashboard:   https://%s:8443  (tailnet only)\n' "$dns"
+    printf ' Local FAST UI:     http://127.0.0.1:%s\n' "$UI_PORT"
+    printf ' Local Wazuh:       https://127.0.0.1:%s\n' "$WAZUH_PORT"
+    printf '============================================================\n'
+    printf '\n'
+    printf 'The FAST UI is public through Funnel. The Wazuh admin interface is\n'
+    printf 'intentionally private and requires a device connected to your tailnet.\n'
+}
+
+share_off() {
+    require_tools
+    info "Disabling FAST public Funnel on HTTPS 443..."
+    ts_write funnel --https=443 off >/dev/null 2>&1 || true
+    info "Disabling Wazuh tailnet Serve endpoint on HTTPS 8443..."
+    ts_write serve --https=8443 off >/dev/null 2>&1 || true
+    info "FAST Tailscale sharing is off."
+}
+
+share_status() {
+    require_tools
+    echo "FAST Funnel status"
+    echo "------------------"
+    tailscale funnel status || true
+    echo ""
+    echo "Wazuh Serve status"
+    echo "------------------"
+    tailscale serve status || true
+}
+
+case "${1:-on}" in
+    on|start)
+        share_on
+        ;;
+    off|stop)
+        share_off
+        ;;
+    status)
+        share_status
+        ;;
+    -h|--help|help)
+        sed -n '2,18p' "$0"
+        ;;
+    *)
+        fail "Unknown command '$1'. Use on, off, or status."
+        ;;
+esac
