@@ -56,6 +56,59 @@ def _env_bool(name: str, default: bool = False) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _request_hostname() -> str:
+    """Return the browser-facing hostname without a port."""
+    host = (request.host or "").strip()
+    if host.startswith("[") and "]" in host:
+        return host[1 : host.index("]")].lower()
+    return host.split(":", 1)[0].lower()
+
+
+def _ui_runtime_config() -> dict:
+    """Build non-secret UI routing metadata from env + request hostname.
+
+    FAST UI can be reached locally or through Tailscale Funnel. When the
+    browser is using a *.ts.net Funnel hostname, the Wazuh button points to the
+    same node on port 8443. `./bin/fast-share` serves that port only inside the
+    tailnet, keeping the SIEM admin surface private while the FAST UI remains
+    public.
+    """
+    hostname = _request_hostname()
+    configured_wazuh = os.getenv("FAST_WAZUH_DASHBOARD_URL", "").strip()
+    configured_public = os.getenv("FAST_PUBLIC_URL", "").strip()
+    configured_mode = os.getenv("FAST_DEPLOYMENT_MODE", "local").strip() or "local"
+    local_wazuh_port = os.getenv("FAST_WAZUH_DASHBOARD_LOCAL_PORT", "5601").strip() or "5601"
+
+    if configured_wazuh:
+        wazuh_url = configured_wazuh
+        wazuh_access = "configured"
+    elif hostname.endswith(".ts.net"):
+        wazuh_url = f"https://{hostname}:8443"
+        wazuh_access = "tailnet"
+    else:
+        wazuh_url = f"https://localhost:{local_wazuh_port}"
+        wazuh_access = "local"
+
+    if configured_public:
+        public_url = configured_public
+        deployment_mode = configured_mode
+    elif hostname.endswith(".ts.net"):
+        public_url = f"https://{hostname}"
+        deployment_mode = "tailscale-funnel"
+    else:
+        public_url = ""
+        deployment_mode = configured_mode
+
+    return {
+        "product_name": "FAST",
+        "product_subtitle": "Fully Automated SIEM & Threat Intelligence Platform",
+        "wazuh_dashboard_url": wazuh_url,
+        "wazuh_access": wazuh_access,
+        "public_url": public_url,
+        "deployment_mode": deployment_mode,
+    }
+
+
 @app.after_request
 def add_security_headers(response):
     response.headers.setdefault("X-Content-Type-Options", "nosniff")
@@ -91,15 +144,7 @@ def health():
 @app.route("/api/ui-config")
 def ui_config():
     """Return non-secret UI configuration only."""
-    return jsonify(
-        {
-            "product_name": "FAST",
-            "product_subtitle": "Fully Automated SIEM & Threat Intelligence Platform",
-            "wazuh_dashboard_url": os.getenv("FAST_WAZUH_DASHBOARD_URL", "").strip(),
-            "public_url": os.getenv("FAST_PUBLIC_URL", "").strip(),
-            "deployment_mode": os.getenv("FAST_DEPLOYMENT_MODE", "local").strip() or "local",
-        }
-    )
+    return jsonify(_ui_runtime_config())
 
 
 @app.route("/api/detections")
