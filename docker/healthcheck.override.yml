@@ -1,13 +1,15 @@
-# Adds Docker-native healthcheck definitions to the official Wazuh
-# compose stack. Deliberately contains NO `volumes:` keys - only
-# `healthcheck:` - so it cannot interfere with Wazuh's own initial
-# file bootstrap (that was the root cause of the earlier ar.conf bug
-# when a previous version of this project bind-mounted /var/ossec/etc
-# subdirectories). See docs/DEPLOYMENT_GUIDE.md for that history.
+# Adds Docker-native healthchecks and a safe host binding for the official
+# Wazuh compose stack. The Dashboard is intentionally NOT published on host
+# port 443: Tailscale Funnel owns 443 for the public FAST UI when sharing is
+# enabled. Instead Wazuh is bound only to localhost:5601 and can be exposed to
+# the tailnet through `./bin/fast-share` on HTTPS 8443.
 #
-# Checks reuse the same authority Wazuh itself uses (wazuh-control)
-# for the Manager, and lightweight TCP checks for Indexer/Dashboard
-# (avoids depending on curl/credentials inside those images).
+# `!override` replaces the official `443:5601` port mapping instead of merging
+# another mapping into the list. This avoids the 443 collision seen when
+# tailscaled already has Funnel active.
+#
+# Healthchecks reuse the same authority Wazuh itself uses (wazuh-control)
+# for the Manager, and lightweight TCP checks for Indexer/Dashboard.
 
 services:
   wazuh.manager:
@@ -31,6 +33,8 @@ services:
       start_period: 45s
 
   wazuh.dashboard:
+    ports: !override
+      - "127.0.0.1:${FAST_WAZUH_DASHBOARD_LOCAL_PORT:-5601}:5601"
     healthcheck:
       test:
         - "CMD-SHELL"
