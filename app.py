@@ -7,6 +7,7 @@ from dotenv import load_dotenv
 from flask import Flask, jsonify, render_template, request, send_file
 
 from core import db, exporter, fetchers, normalizer
+from core.platform_api import inject_platform_ui, register_platform_routes
 
 load_dotenv()
 
@@ -47,6 +48,8 @@ DETECTIONS = [
         "status": "enabled",
     },
 ]
+
+register_platform_routes(app)
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -121,7 +124,7 @@ def add_security_headers(response):
 @app.route("/")
 def index():
     db.init_database()
-    return render_template("index.html")
+    return inject_platform_ui(render_template("index.html"))
 
 
 @app.route("/api/health")

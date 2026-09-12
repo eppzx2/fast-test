@@ -3,9 +3,10 @@
 # Security default: the host-side port binds only to 127.0.0.1. To expose it
 # deliberately on another interface (for example a Tailscale address), set
 # FAST_WEB_BIND before `./bin/fast up`, e.g. FAST_WEB_BIND=100.x.y.z.
-# Threat-feed credentials stay in the git-ignored project .env file and are
-# loaded by python-dotenv from the /app bind mount; they are not copied into
-# Docker container environment metadata.
+#
+# The web app also joins the already-created Wazuh single-node network so its
+# read-only platform endpoints can query the Wazuh server API and Indexer
+# directly. No Docker socket is exposed to the UI container.
 
 services:
   ioc-collector-web:
@@ -22,11 +23,27 @@ services:
       FAST_WEB_HOST: "0.0.0.0"
       FAST_WEB_PORT: "5000"
       FAST_WEB_DEBUG: "0"
+      FAST_WAZUH_API_URL: "${FAST_WAZUH_API_URL:-https://wazuh.manager:55000}"
+      FAST_WAZUH_API_USER: "${FAST_WAZUH_API_USER:-wazuh-wui}"
+      FAST_WAZUH_API_PASSWORD: "${FAST_WAZUH_API_PASSWORD:-MyS3cr37P450r.*-}"
+      FAST_WAZUH_INDEXER_URL: "${FAST_WAZUH_INDEXER_URL:-https://wazuh.indexer:9200}"
+      FAST_WAZUH_INDEXER_USER: "${FAST_WAZUH_INDEXER_USER:-admin}"
+      FAST_WAZUH_INDEXER_PASSWORD: "${FAST_WAZUH_INDEXER_PASSWORD:-SecretPassword}"
+      FAST_WAZUH_VERIFY_TLS: "${FAST_WAZUH_VERIFY_TLS:-0}"
+      FAST_WAZUH_TIMEOUT: "${FAST_WAZUH_TIMEOUT:-8}"
     volumes:
       - ../:/app
+    networks:
+      - default
+      - wazuh
     healthcheck:
       test: ["CMD", "python3", "-c", "import urllib.request as u; u.urlopen('http://localhost:5000/api/health', timeout=3)"]
       interval: 15s
       timeout: 5s
       retries: 5
       start_period: 10s
+
+networks:
+  wazuh:
+    external: true
+    name: "${WAZUH_DOCKER_NETWORK:-single-node_default}"
