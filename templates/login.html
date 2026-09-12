@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="color-scheme" content="dark">
+<title>FAST Sign In</title>
+<style>
+:root{--bg:#040b16;--panel:#0a1728;--border:#183452;--text:#eef6ff;--muted:#91a8c2;--blue:#3b82f6;--blue2:#2563eb;--red:#fb7185}
+*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;background:radial-gradient(circle at 70% 10%,rgba(37,99,235,.16),transparent 30%),var(--bg);color:var(--text);font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}.wrap{width:min(420px,calc(100% - 32px));border:1px solid var(--border);border-radius:18px;background:linear-gradient(180deg,rgba(13,29,49,.98),rgba(8,21,37,.98));padding:28px;box-shadow:0 30px 80px rgba(0,0,0,.38)}.brand{display:flex;align-items:center;gap:12px;margin-bottom:24px}.mark{width:44px;height:44px;border-radius:12px;display:grid;place-items:center;font-weight:900;background:linear-gradient(145deg,var(--blue),var(--blue2));box-shadow:0 0 30px rgba(37,99,235,.26)}h1{font-size:24px;margin:0 0 7px}.sub{color:var(--muted);font-size:13px;line-height:1.6;margin-bottom:22px}.field{margin-top:13px}.field label{display:block;font-size:11px;color:var(--muted);margin-bottom:7px}.field input{width:100%;border:1px solid var(--border);border-radius:10px;background:#071321;color:var(--text);padding:11px 12px;outline:none}.field input:focus{border-color:rgba(59,130,246,.65);box-shadow:0 0 0 3px rgba(59,130,246,.1)}button{width:100%;margin-top:18px;border:1px solid rgba(96,165,250,.38);border-radius:10px;padding:11px 14px;background:linear-gradient(135deg,var(--blue),var(--blue2));color:#fff;font-weight:800;cursor:pointer}.error{margin:0 0 14px;padding:10px 12px;border:1px solid rgba(251,113,133,.28);border-radius:10px;background:rgba(251,113,133,.07);color:#fda4af;font-size:12px}.note{margin-top:18px;color:var(--muted);font-size:10.5px;line-height:1.55}
+</style>
+</head>
+<body>
+  <main class="wrap">
+    <div class="brand"><div class="mark">F</div><div><strong>FAST</strong><div style="font-size:10px;color:var(--muted);margin-top:2px">Security Operations Platform</div></div></div>
+    <h1>Sign in</h1>
+    <div class="sub">Authenticate before accessing FAST security telemetry and analyst workflows.</div>
+    {% if error %}<div class="error">{{ error }}</div>{% endif %}
+    <form method="post" autocomplete="on">
+      <input type="hidden" name="next" value="{{ next_path }}">
+      <div class="field"><label for="username">Username</label><input id="username" name="username" autocomplete="username" required autofocus></div>
+      <div class="field"><label for="password">Password</label><input id="password" name="password" type="password" autocomplete="current-password" required></div>
+      <button type="submit">Sign in to FAST</button>
+    </form>
+    <div class="note">Roles supported: Viewer, Analyst and Admin. Wazuh credentials are never sent to the browser.</div>
+  </main>
+</body>
+</html>

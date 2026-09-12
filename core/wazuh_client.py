@@ -1,8 +1,8 @@
 """Read-only Wazuh integration used by the FAST platform UI.
 
 The browser never receives Wazuh credentials. FAST talks to the Wazuh server
-API for agent inventory and to the Wazuh Indexer for recent alert documents,
-then returns only the small fields needed by the demo UI.
+API for agent inventory and to the Wazuh Indexer for alert documents, then
+returns only the fields needed by the product UI.
 """
 
 from __future__ import annotations
@@ -146,8 +146,8 @@ class WazuhClient:
         minutes: int = 30,
     ) -> dict:
         """Return recent real FAST alerts from wazuh-alerts-* in the Indexer."""
-        limit = max(1, min(100, int(limit)))
-        minutes = max(1, min(1440, int(minutes)))
+        limit = max(1, min(500, int(limit)))
+        minutes = max(1, min(10080, int(minutes)))
         selected_rules = [str(rule_id) for rule_id in rule_ids if str(rule_id)]
         if not selected_rules:
             selected_rules = list(FAST_RULE_IDS)
@@ -169,6 +169,9 @@ class WazuhClient:
                 "rule.level",
                 "rule.description",
                 "rule.groups",
+                "rule.mitre.id",
+                "rule.mitre.tactic",
+                "rule.mitre.technique",
                 "agent.id",
                 "agent.name",
                 "agent.ip",
@@ -178,6 +181,9 @@ class WazuhClient:
                 "data.srcip",
                 "data.src_ip",
                 "data.dstip",
+                "data.dst_ip",
+                "data.srcport",
+                "data.dstport",
             ],
         }
         response = self._request(
@@ -200,6 +206,7 @@ class WazuhClient:
             rule = source.get("rule") or {}
             agent = source.get("agent") or {}
             event_data = source.get("data") or {}
+            mitre = rule.get("mitre") or {}
             rule_id = str(rule.get("id") or "")
             items.append(
                 {
@@ -210,6 +217,9 @@ class WazuhClient:
                     "level": rule.get("level"),
                     "description": rule.get("description") or "",
                     "groups": rule.get("groups") or [],
+                    "mitre_ids": mitre.get("id") or [],
+                    "mitre_tactics": mitre.get("tactic") or [],
+                    "mitre_techniques": mitre.get("technique") or [],
                     "agent_id": str(agent.get("id") or ""),
                     "agent_name": agent.get("name") or "Unknown",
                     "agent_ip": agent.get("ip") or "",
@@ -218,7 +228,13 @@ class WazuhClient:
                         or event_data.get("src_ip")
                         or ""
                     ),
-                    "destination_ip": event_data.get("dstip") or "",
+                    "destination_ip": (
+                        event_data.get("dstip")
+                        or event_data.get("dst_ip")
+                        or ""
+                    ),
+                    "source_port": event_data.get("srcport") or "",
+                    "destination_port": event_data.get("dstport") or "",
                     "location": source.get("location") or "",
                     "decoder": (source.get("decoder") or {}).get("name") or "",
                     "manager": (source.get("manager") or {}).get("name") or "",
@@ -235,6 +251,81 @@ class WazuhClient:
             "source": "wazuh-indexer",
             "items": items,
             "total": total,
+            "sampled": total > len(items),
             "window_minutes": minutes,
             "rule_ids": selected_rules,
+        }
+
+    def rule_activity(
+        self,
+        *,
+        rule_ids: Iterable[str] = FAST_RULE_IDS,
+        minutes: int = 1440,
+    ) -> dict:
+        """Return exact alert counts and latest hits per FAST rule."""
+        minutes = max(1, min(10080, int(minutes)))
+        selected_rules = [str(rule_id) for rule_id in rule_ids if str(rule_id)] or list(FAST_RULE_IDS)
+        query = {
+            "size": 0,
+            "query": {
+                "bool": {
+                    "filter": [
+                        {"range": {"timestamp": {"gte": f"now-{minutes}m"}}},
+                        {"terms": {"rule.id": selected_rules}},
+                    ]
+                }
+            },
+            "aggs": {
+                "by_rule": {
+                    "terms": {"field": "rule.id", "size": max(10, len(selected_rules))},
+                    "aggs": {
+                        "latest": {
+                            "top_hits": {
+                                "size": 1,
+                                "sort": [{"timestamp": {"order": "desc"}}],
+                                "_source": [
+                                    "timestamp",
+                                    "rule.id",
+                                    "rule.level",
+                                    "agent.id",
+                                    "agent.name",
+                                ],
+                            }
+                        }
+                    },
+                }
+            },
+        }
+        response = self._request(
+            "POST",
+            f"{self.indexer_url}/wazuh-alerts-*/_search",
+            auth=(self.indexer_user, self.indexer_password),
+            headers={"Content-Type": "application/json"},
+            json=query,
+        )
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise WazuhIntegrationError("Wazuh Indexer returned invalid JSON") from exc
+
+        items = {rule_id: {"rule_id": rule_id, "count": 0, "last_triggered": "", "last_agent": ""} for rule_id in selected_rules}
+        buckets = (((payload.get("aggregations") or {}).get("by_rule") or {}).get("buckets") or [])
+        for bucket in buckets:
+            rule_id = str(bucket.get("key") or "")
+            if rule_id not in items:
+                continue
+            latest_hits = (((bucket.get("latest") or {}).get("hits") or {}).get("hits") or [])
+            latest_source = (latest_hits[0].get("_source") or {}) if latest_hits else {}
+            agent = latest_source.get("agent") or {}
+            items[rule_id] = {
+                "rule_id": rule_id,
+                "count": int(bucket.get("doc_count") or 0),
+                "last_triggered": latest_source.get("timestamp") or "",
+                "last_agent": agent.get("name") or agent.get("id") or "",
+            }
+
+        return {
+            "source": "wazuh-indexer",
+            "items": [items[rule_id] for rule_id in selected_rules],
+            "window_minutes": minutes,
         }

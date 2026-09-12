@@ -9,6 +9,7 @@ venv/
 
 # Runtime state
 ioc_database.db
+fast_operations.db
 *.db-journal
 *.log
 

@@ -1,4 +1,4 @@
-"""Lightweight Flask dashboard for the FAST IOC collector."""
+"""Lightweight Flask dashboard for the FAST security platform."""
 
 import logging
 import os
@@ -7,7 +7,10 @@ from dotenv import load_dotenv
 from flask import Flask, jsonify, render_template, request, send_file
 
 from core import db, exporter, fetchers, normalizer
+from core.auth import current_actor, require_role, setup_auth
+from core.detections import DETECTIONS
 from core.platform_api import inject_platform_ui, register_platform_routes
+from core.security_ops import audit_event
 
 load_dotenv()
 
@@ -18,36 +21,11 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+setup_auth(app)
+
 _configured_db_path = os.getenv("FAST_DB_PATH", "").strip()
 if _configured_db_path:
     db.DB_PATH = _configured_db_path
-
-DETECTIONS = [
-    {
-        "id": "100200",
-        "name": "SSH Failed Authentication",
-        "level": 10,
-        "mitre": ["T1110"],
-        "description": "Promotes Wazuh rule 5760 failed SSH authentication events into the FAST detection namespace.",
-        "status": "enabled",
-    },
-    {
-        "id": "100211",
-        "name": "Port Scan",
-        "level": 7,
-        "mitre": ["T1046"],
-        "description": "Correlates 8 or more FAST_PORTSCAN probes from the same source IP within 60 seconds.",
-        "status": "enabled",
-    },
-    {
-        "id": "100221",
-        "name": "LOLBin / Masquerading",
-        "level": 12,
-        "mitre": ["T1036.003", "T1105"],
-        "description": "Confirms a process presenting as httpd from a non-standard path with wget-style command-line evidence.",
-        "status": "enabled",
-    },
-]
 
 register_platform_routes(app)
 
@@ -68,14 +46,7 @@ def _request_hostname() -> str:
 
 
 def _ui_runtime_config() -> dict:
-    """Build non-secret UI routing metadata from env + request hostname.
-
-    FAST UI can be reached locally or through Tailscale Funnel. When the
-    browser is using a *.ts.net Funnel hostname, the Wazuh button points to the
-    same node on port 8443. `./bin/fast-share` serves that port only inside the
-    tailnet, keeping the SIEM admin surface private while the FAST UI remains
-    public.
-    """
+    """Build non-secret UI routing metadata from env + request hostname."""
     hostname = _request_hostname()
     configured_wazuh = os.getenv("FAST_WAZUH_DASHBOARD_URL", "").strip()
     configured_public = os.getenv("FAST_PUBLIC_URL", "").strip()
@@ -110,6 +81,21 @@ def _ui_runtime_config() -> dict:
         "public_url": public_url,
         "deployment_mode": deployment_mode,
     }
+
+
+def _audit_nonfatal(action: str, *, object_type: str = "", object_id: str = "", details=None) -> None:
+    try:
+        actor, role = current_actor()
+        audit_event(
+            action,
+            actor=actor,
+            role=role,
+            object_type=object_type,
+            object_id=object_id,
+            details=details or {},
+        )
+    except Exception:
+        logger.exception("Could not write FAST audit event: %s", action)
 
 
 @app.after_request
@@ -152,7 +138,7 @@ def ui_config():
 
 @app.route("/api/detections")
 def detections():
-    """Expose the stable FAST detection catalogue for UI presentation."""
+    """Expose the stable FAST detection catalogue for backward compatibility."""
     return jsonify({"items": DETECTIONS, "total": len(DETECTIONS)})
 
 
@@ -173,15 +159,9 @@ def get_iocs():
     if type_filter:
         all_iocs = [item for item in all_iocs if item.get("ioc_type") == type_filter]
     if feed_filter:
-        all_iocs = [
-            item for item in all_iocs if feed_filter in (item.get("source_feed") or "")
-        ]
+        all_iocs = [item for item in all_iocs if feed_filter in (item.get("source_feed") or "")]
     if search:
-        all_iocs = [
-            item
-            for item in all_iocs
-            if search in str(item.get("ioc_value", "")).lower()
-        ]
+        all_iocs = [item for item in all_iocs if search in str(item.get("ioc_value", "")).lower()]
     if min_score:
         all_iocs = [
             item
@@ -205,6 +185,7 @@ def get_iocs():
 
 
 @app.route("/api/fetch", methods=["POST"])
+@require_role("admin", csrf=True)
 def fetch_feeds():
     try:
         db.init_database()
@@ -229,13 +210,17 @@ def fetch_feeds():
         if processed == 0:
             return jsonify({"status": "error", "message": "No records stored"}), 500
 
+        _audit_nonfatal(
+            "intelligence.sync",
+            object_type="threat_intelligence",
+            details={"normalized_count": len(normalized), "processed_count": processed},
+        )
         return jsonify(
             {
                 "status": "ok",
                 "raw_counts": raw_counts,
                 "normalized_count": len(normalized),
                 "processed_count": processed,
-                # Backward-compatible field name used by the existing UI.
                 "inserted_count": processed,
                 "total_in_db": db.get_count(),
             }
@@ -265,6 +250,12 @@ def export_iocs():
 
     if not ok or not os.path.exists(filepath):
         return jsonify({"status": "error", "message": "Export failed"}), 500
+    _audit_nonfatal(
+        "intelligence.export",
+        object_type="ioc_database",
+        object_id=fmt,
+        details={"record_count": len(iocs)},
+    )
     return send_file(filepath, mimetype=mimetype, as_attachment=True)
 
 
@@ -300,5 +291,4 @@ def get_stats():
 if __name__ == "__main__":
     host = os.getenv("FAST_WEB_HOST", "0.0.0.0")
     port = int(os.getenv("FAST_WEB_PORT", "5000"))
-    # Debug mode is NEVER on implicitly in deployed environments.
     app.run(debug=_env_bool("FAST_WEB_DEBUG", False), host=host, port=port)
