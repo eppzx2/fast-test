@@ -9,6 +9,13 @@
     return Number.isNaN(date.getTime()) ? escText(value) : date.toLocaleString();
   };
 
+  function removeThreatFeedsNav() {
+    // Threat-feed coverage already exists in Overview and IOC Database.
+    // Keep the legacy view in the DOM because the original dashboard script
+    // still refreshes its feed cards, but remove the redundant navigation tab.
+    document.querySelector('.nav-btn[data-view="feeds"]')?.remove();
+  }
+
   function setPageMeta(eyebrow, title, subtitle) {
     const eyebrowEl = $("pageEyebrow");
     const titleEl = $("pageTitle");
@@ -287,6 +294,7 @@
     }, 8000);
   }
 
+  removeThreatFeedsNav();
   installSimulationNav();
   installSimulationView();
   redesignArchitecture();
