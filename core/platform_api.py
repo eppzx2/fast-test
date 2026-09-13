@@ -9,6 +9,7 @@ from flask import jsonify, request
 
 from core.auth import current_actor, require_role
 from core.detections import DETECTIONS
+from core.mitre import build_mitre_coverage, enrich_alert, enrich_detection
 from core.security_ops import (
     audit_event,
     build_incident_cases,
@@ -30,10 +31,12 @@ def inject_platform_ui(html: str) -> str:
     styles = [
         '<link rel="stylesheet" href="/static/fast-platform.css">',
         '<link rel="stylesheet" href="/static/security-ops.css">',
+        '<link rel="stylesheet" href="/static/mitre.css">',
     ]
     scripts = [
         '<script src="/static/fast-platform.js"></script>',
         '<script src="/static/security-ops.js"></script>',
+        '<script src="/static/mitre.js"></script>',
     ]
     for asset in styles:
         if asset not in html:
@@ -67,7 +70,7 @@ def _validation_payload(activity: list[dict], fresh_minutes: int) -> list[dict]:
             validation = "waiting"
         results.append(
             {
-                **detection,
+                **enrich_detection(detection),
                 "validation": validation,
                 "last_triggered": last_triggered,
                 "last_agent": metric.get("last_agent") or "",
@@ -120,6 +123,7 @@ def register_platform_routes(app) -> None:
             data = get_wazuh_client().recent_alerts(
                 rule_ids=rule_ids, limit=limit, minutes=minutes
             )
+            data["items"] = [enrich_alert(item) for item in data.get("items", [])]
             return jsonify({"status": "ok", **data})
         except WazuhIntegrationError as exc:
             app.logger.warning("Wazuh live alerts unavailable: %s", exc)
@@ -177,7 +181,7 @@ def register_platform_routes(app) -> None:
                 metric = by_rule.get(detection["id"], {})
                 items.append(
                     {
-                        **detection,
+                        **enrich_detection(detection),
                         "alerts_24h": int(metric.get("count") or 0),
                         "last_triggered": metric.get("last_triggered") or "",
                         "last_agent": metric.get("last_agent") or "",
@@ -197,6 +201,32 @@ def register_platform_routes(app) -> None:
         except WazuhIntegrationError as exc:
             app.logger.warning("Detection health unavailable: %s", exc)
             return jsonify({"status": "unavailable", "items": [], "total": 0, "message": str(exc)}), 503
+
+    @app.get("/api/security/mitre")
+    @require_role("viewer")
+    def security_mitre():
+        """Map current FAST detections to ATT&CK and overlay real Wazuh activity."""
+        try:
+            minutes = min(10080, max(1, int(request.args.get("minutes", 1440))))
+        except (TypeError, ValueError):
+            minutes = 1440
+        try:
+            activity = get_wazuh_client().rule_activity(
+                rule_ids=FAST_RULE_IDS, minutes=minutes
+            )
+            coverage = build_mitre_coverage(
+                activity.get("items", []), window_minutes=minutes
+            )
+            return jsonify(
+                {
+                    "status": "ok",
+                    "source": "fast-rule-catalogue+wazuh-indexer",
+                    **coverage,
+                }
+            )
+        except WazuhIntegrationError as exc:
+            app.logger.warning("MITRE ATT&CK mapping unavailable: %s", exc)
+            return jsonify({"status": "unavailable", "tactics": [], "techniques": [], "message": str(exc)}), 503
 
     @app.get("/api/security/validation")
     @require_role("viewer")
@@ -233,8 +263,9 @@ def register_platform_routes(app) -> None:
             alerts = get_wazuh_client().recent_alerts(
                 rule_ids=FAST_RULE_IDS, limit=limit, minutes=minutes
             )
-            cases = build_incident_cases(alerts.get("items", []))
-            correlations = correlate_alerts(alerts.get("items", []), window_minutes=60)
+            enriched_alerts = [enrich_alert(item) for item in alerts.get("items", [])]
+            cases = build_incident_cases(enriched_alerts)
+            correlations = correlate_alerts(enriched_alerts, window_minutes=60)
             return jsonify(
                 {
                     "status": "ok",
