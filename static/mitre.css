@@ -1,0 +1,18 @@
+/* MITRE ATT&CK mapping view. Blue states represent coverage/activity, not health. */
+.mitre-summary{grid-template-columns:repeat(4,minmax(0,1fr))}
+.mitre-panel{overflow:hidden}
+.mitre-legend{display:flex;align-items:center;gap:12px;flex-wrap:wrap;font-size:10px;color:var(--muted)}
+.mitre-legend span{display:flex;align-items:center;gap:6px}.legend-dot{width:8px;height:8px;border-radius:50%;display:inline-block;border:1px solid var(--border)}
+.legend-dot.observed{background:var(--blue);border-color:rgba(96,165,250,.65)}.legend-dot.mapped{background:rgba(59,130,246,.22);border-color:rgba(96,165,250,.45)}.legend-dot.empty{background:#0a1625}
+.mitre-matrix{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;padding:0 18px 18px}
+.mitre-tactic{min-height:145px;border:1px solid var(--border);border-radius:13px;background:#071321;padding:13px;display:flex;flex-direction:column;gap:9px}
+.mitre-tactic.mapped{border-color:rgba(59,130,246,.32);background:linear-gradient(180deg,rgba(37,99,235,.08),#071321)}
+.mitre-tactic.observed{border-color:rgba(96,165,250,.58);background:linear-gradient(180deg,rgba(37,99,235,.2),#071321);box-shadow:inset 0 0 0 1px rgba(96,165,250,.05)}
+.mitre-tactic.empty{opacity:.58;border-style:dashed}.mitre-tactic strong{font-size:13px;line-height:1.3}.mitre-tactic-head,.mitre-tactic-meta{display:flex;align-items:center;justify-content:space-between;gap:8px}
+.mitre-tactic-head{font-size:9px;color:var(--faint);text-transform:uppercase;letter-spacing:.55px}.mitre-state{padding:3px 6px;border:1px solid var(--border);border-radius:999px}
+.mitre-tactic.observed .mitre-state{color:var(--blue-3);border-color:rgba(96,165,250,.4)}.mitre-tactic.mapped .mitre-state{color:#9abce8}
+.mitre-tactic-meta{font-size:9.5px;color:var(--muted)}.mitre-technique-chips{display:flex;gap:5px;flex-wrap:wrap;margin-top:auto}.mitre-id{font-size:9px;padding:4px 6px;border:1px solid rgba(96,165,250,.24);border-radius:7px;color:#a8c8ef;background:rgba(37,99,235,.06)}
+.mitre-muted{font-size:9px;color:var(--faint)}.mitre-note{padding:0 18px 18px}.mitre-link{display:inline-flex;gap:6px;align-items:center;color:var(--blue-3);text-decoration:none}.mitre-link:hover{text-decoration:underline}
+#mitreTechniqueTable{min-width:980px}
+@media(max-width:1180px){.mitre-matrix{grid-template-columns:repeat(2,minmax(0,1fr))}.mitre-summary{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:760px){.mitre-matrix,.mitre-summary{grid-template-columns:1fr}.mitre-legend{align-items:flex-start}.mitre-tactic{min-height:120px}}
