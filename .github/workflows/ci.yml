@@ -32,6 +32,7 @@ jobs:
         run: |
           node --check static/fast-platform.js
           node --check static/security-ops.js
+          node --check static/mitre.js
 
       - name: Shell syntax
         run: |
