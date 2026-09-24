@@ -161,12 +161,28 @@ fi
 
 systemctl enable auditd >/dev/null 2>&1 || true
 systemctl restart auditd
-augenrules --load 2>/dev/null || auditctl -R "$AUDIT_RULE_FILE"
 sleep 1
 systemctl is-active --quiet auditd
 
-if ! auditctl -l | grep -q 'audit-wazuh-c'; then
+# Be truly idempotent: rerunning setup must not fail just because the FAST
+# execve rule is already loaded in the kernel. Keep the persistent rule file
+# above, and only load rules when the key is not already active.
+if auditctl -l 2>/dev/null | grep -q 'audit-wazuh-c'; then
+    echo "[OK] auditd execve rule already active"
+else
+    # Kali/auditd can report "Rule exists" while loading a ruleset that was
+    # partially or previously loaded. Do not treat the loader's exit code as
+    # authoritative; verify the actual kernel rule state afterwards.
+    augenrules --load >/tmp/fast-augenrules.log 2>&1 || true
+    if ! auditctl -l 2>/dev/null | grep -q 'audit-wazuh-c'; then
+        auditctl -R "$AUDIT_RULE_FILE" >/tmp/fast-auditctl.log 2>&1 || true
+    fi
+fi
+
+if ! auditctl -l 2>/dev/null | grep -q 'audit-wazuh-c'; then
     echo "ERROR: auditd execve rule (key=audit-wazuh-c) is not active." >&2
+    [ -s /tmp/fast-augenrules.log ] && cat /tmp/fast-augenrules.log >&2 || true
+    [ -s /tmp/fast-auditctl.log ] && cat /tmp/fast-auditctl.log >&2 || true
     exit 1
 fi
 
