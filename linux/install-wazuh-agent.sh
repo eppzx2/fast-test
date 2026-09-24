@@ -103,8 +103,14 @@ if ! grep -Fq "<address>$MANAGER_IP</address>" "$OSSEC_CONF"; then
     step "Writing Manager address into ossec.conf"
     sed -i "s|<address>.*</address>|<address>$MANAGER_IP</address>|g" "$OSSEC_CONF"
 fi
-if command -v xmllint >/dev/null 2>&1; then
-    xmllint --noout "$OSSEC_CONF" || fail "Invalid Wazuh agent XML configuration"
+# Wazuh ossec.conf may legally contain multiple top-level <ossec_config>
+# sections, so generic XML validators such as xmllint can report a false
+# "Extra content at the end of the document" error. Validate with Wazuh's
+# own agent parser instead.
+if [ -x /var/ossec/bin/wazuh-agentd ]; then
+    /var/ossec/bin/wazuh-agentd -t         || fail "Invalid Wazuh agent configuration"
+else
+    fail "Wazuh agent validator was not found at /var/ossec/bin/wazuh-agentd"
 fi
 
 step "Starting Wazuh Agent"
