@@ -254,7 +254,7 @@ The setup:
 Current detection IDs:
 
 ```text
-SSH authentication failure:  Wazuh 5710/5760 -> FAST 100200 (level 10)
+SSH failure staging:         Wazuh 5710/5760 -> FAST 100199 (level 1, no_log)\nSSH brute-force correlation:  FAST 100199 -> FAST 100200 (level 10, 5+ same srcip/60s, 60s suppression)
 Port-scan probe:            Wazuh 4100 -> FAST 100210 (level 3)
 Port-scan correlation:      FAST 100210 -> FAST 100211 (level 7, 8+ probes/60s)
 LOLBin signal:              Wazuh 80792 -> FAST 100220 (level 6)
@@ -326,7 +326,7 @@ docker exec single-node-wazuh.manager-1 \
 
 ### SSH base alert appears but FAST `100200` does not
 
-Confirm the deployed custom rule file contains `100200` with `<if_sid>5710,5760</if_sid>`
+Confirm the deployed custom rules contain `100199` with `<if_sid>5710,5760</if_sid>` and `100200` with `<if_matched_sid>100199</if_matched_sid>`
 and validate the Manager configuration:
 
 ```bash
