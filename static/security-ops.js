@@ -78,7 +78,7 @@
     s.innerHTML=`<div class="section-head"><div><h2>Incident Workflow</h2><p>Wazuh remains the alert source of truth; FAST stores only analyst status, assignee and notes.</p></div><button class="btn" id="refreshIncidents">Refresh</button></div>
     <div class="ops-metrics"><div class="card ops-metric"><span>Open</span><strong id="incOpen">0</strong></div><div class="card ops-metric"><span>Critical / High</span><strong id="incHigh">0</strong></div><div class="card ops-metric"><span>Correlations</span><strong id="incCorr">0</strong></div></div>
     <div class="platform-grid incident-layout"><div class="card table-card"><div class="card-head padded-head"><div><div class="card-kicker">Real Wazuh detections</div><div class="card-title">Detection Cases</div></div><span class="live-badge" id="incBadge">LIVE</span></div><div class="table-scroll"><table id="incidentTable"><thead><tr><th>Time</th><th>Detection</th><th>Agent</th><th>Source</th><th>Priority</th><th>Status</th><th>Assignee</th><th></th></tr></thead><tbody id="incBody"></tbody></table><div class="platform-empty" id="incEmpty">No FAST detection cases.</div></div></div>
-    <div class="card case-panel"><div class="card-head"><div><div class="card-kicker">Analyst workspace</div><div class="card-title">Case Details</div></div></div><div id="caseEmpty" class="platform-empty compact">Select a case.</div><div id="caseEditor" hidden><div class="case-summary" id="caseSummary"></div><label class="ops-label">Status</label><select class="control" id="caseStatus"><option value="new">New</option><option value="investigating">Investigating</option><option value="resolved">Resolved</option><option value="false_positive">False Positive</option></select><label class="ops-label">Assignee</label><input class="control" id="caseAssignee" maxlength="120"><label class="ops-label">Notes</label><textarea class="control ops-textarea" id="caseNotes" maxlength="4000"></textarea><button class="btn btn-primary full-width" id="saveCase">Save Analyst State</button><div class="platform-source-note" id="casePermission"></div></div></div></div>
+    <div class="card case-panel"><div class="card-head"><div><div class="card-kicker">Analyst workspace</div><div class="card-title">Incident Details</div></div></div><div id="caseEmpty" class="platform-empty compact">Select a case.</div><div id="caseEditor" hidden><div class="case-summary" id="caseSummary"></div><label class="ops-label">Status</label><select class="control" id="caseStatus"><option value="new">New</option><option value="investigating">Investigating</option><option value="resolved">Resolved</option><option value="false_positive">False Positive</option></select><label class="ops-label">Assignee</label><input class="control" id="caseAssignee" maxlength="120"><label class="ops-label">Notes</label><textarea class="control ops-textarea" id="caseNotes" maxlength="4000"></textarea><button class="btn btn-primary full-width" id="saveCase">Save Analyst State</button><div class="platform-source-note" id="casePermission"></div></div></div></div>
     <div class="card" style="margin-top:16px"><div class="card-head"><div><div class="card-kicker">Correlation engine</div><div class="card-title">Related Activity</div></div><span class="live-badge">REAL ALERTS ONLY</span></div><div id="corrList" class="correlation-list"></div></div>`;
     main.insertBefore(s,$("view-detections")); $("refreshIncidents").onclick=loadIncidents; $("saveCase").onclick=saveCase;
   }
@@ -101,7 +101,36 @@
 
   function selectCase(item){
     selectedCase=item; $("caseEmpty").hidden=true; $("caseEditor").hidden=false;
-    $("caseSummary").innerHTML=`<strong>${html(item.attack_type||"FAST detection")}</strong><span>Rule ${html(item.rule_id)} · ${html(item.agent_name||item.agent_id||"Unknown")}</span><span>${html(when(item.timestamp))}</span>`;
+    const detail=(label,value,mono=false,wide=false)=>`<div class="case-detail${wide?" wide":""}"><span>${html(label)}</span><strong class="${mono?"mono":""}">${html(value||"—")}</strong></div>`;
+    const mitreIds=(item.mitre_ids||[]).join(", ");
+    const mitreTactics=(item.mitre_tactics||[]).join(", ");
+    const mitreTechniques=(item.mitre_techniques||[]).join(", ");
+    $("caseSummary").innerHTML=`
+      <div class="case-headline">
+        <strong>${html(item.attack_type||"FAST detection")}</strong>
+        <span class="priority ${html(item.priority||"low")}">${html(item.priority||"low")}</span>
+      </div>
+      <p class="case-description">${html(item.description||"No alert description supplied by Wazuh.")}</p>
+      <div class="case-detail-grid">
+        ${detail("Host / Agent",item.agent_name||item.agent_id||"Unknown")}
+        ${detail("Agent IP",item.agent_ip,true)}
+        ${detail("Source IP",item.source_ip,true)}
+        ${detail("Source Port",item.source_port,true)}
+        ${detail("Destination IP",item.destination_ip,true)}
+        ${detail("Destination Port",item.destination_port,true)}
+        ${detail("Rule ID",item.rule_id,true)}
+        ${detail("Severity / Level",item.level,true)}
+        ${detail("Timestamp",when(item.timestamp),true,true)}
+        ${detail("Process",item.process_name,true)}
+        ${detail("Executable",item.process_executable,true,true)}
+        ${detail("MITRE Tactic",mitreTactics,false,true)}
+        ${detail("MITRE Technique",mitreTechniques,false,true)}
+        ${detail("MITRE ID",mitreIds,true,true)}
+        ${detail("Log Location",item.location,true,true)}
+        ${detail("Decoder",item.decoder,true)}
+        ${detail("Manager",item.manager,true)}
+        ${detail("Event ID",item.event_id,true,true)}
+      </div>`;
     $("caseStatus").value=item.status||"new"; $("caseAssignee").value=item.assignee||""; $("caseNotes").value=item.notes||"";
     const writable=!auth.enabled||can("analyst"); [$("caseStatus"),$("caseAssignee"),$("caseNotes"),$("saveCase")].forEach(el=>el.disabled=!writable);
     $("casePermission").textContent=writable?"Analyst state is audited; Wazuh alert data is read-only.":"Analyst role required to update cases.";
