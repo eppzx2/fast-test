@@ -1,0 +1,88 @@
+#!/usr/bin/env bash
+# FAST CLI bootstrap + runner.
+#
+# First run:
+#   - installs python3-venv/python3-pip on apt-based systems when missing
+#   - creates .venv
+#   - installs requirements.txt
+#
+# Every run:
+#   - executes cli.py with the virtualenv Python
+#
+# Examples:
+#   bash bin/fast-cli --help
+#   bash bin/fast-cli --fetch
+#   bash bin/fast-cli --show
+#   bash bin/fast-cli --export wazuh
+
+set -Eeuo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+VENV_DIR="$ROOT_DIR/.venv"
+REQUIREMENTS="$ROOT_DIR/requirements.txt"
+INSTALL_MARKER="$VENV_DIR/.fast-requirements-installed"
+PYTHON_BIN="${PYTHON_BIN:-python3}"
+
+info() { printf '[FAST CLI] %s\n' "$*"; }
+fail() { printf '[FAST CLI] ERROR: %s\n' "$*" >&2; exit 1; }
+
+command -v "$PYTHON_BIN" >/dev/null 2>&1 || fail "$PYTHON_BIN is not installed"
+[ -f "$REQUIREMENTS" ] || fail "requirements.txt not found at $REQUIREMENTS"
+[ -f "$ROOT_DIR/cli.py" ] || fail "cli.py not found at $ROOT_DIR/cli.py"
+
+sudo_cmd=()
+if [ "$EUID" -ne 0 ]; then
+    command -v sudo >/dev/null 2>&1 || fail "sudo is required to install missing system packages"
+    sudo_cmd=(sudo)
+fi
+
+ensure_system_packages() {
+    command -v apt-get >/dev/null 2>&1 || return 0
+
+    local missing=()
+    if command -v dpkg >/dev/null 2>&1; then
+        dpkg -s python3-venv >/dev/null 2>&1 || missing+=(python3-venv)
+        dpkg -s python3-pip >/dev/null 2>&1 || missing+=(python3-pip)
+    fi
+
+    if [ "${#missing[@]}" -gt 0 ]; then
+        info "Installing missing system packages: ${missing[*]}"
+        "${sudo_cmd[@]}" apt-get update
+        "${sudo_cmd[@]}" apt-get install -y "${missing[@]}"
+    fi
+}
+
+create_venv() {
+    if [ -x "$VENV_DIR/bin/python" ]; then
+        return 0
+    fi
+
+    info "Creating Python virtual environment at $VENV_DIR"
+    if "$PYTHON_BIN" -m venv "$VENV_DIR" >/dev/null 2>&1; then
+        return 0
+    fi
+
+    # Debian/Ubuntu can have Python installed while the venv package is absent.
+    rm -rf "$VENV_DIR"
+    ensure_system_packages
+    "$PYTHON_BIN" -m venv "$VENV_DIR" || fail "Could not create virtual environment"
+}
+
+install_requirements_if_needed() {
+    if [ ! -f "$INSTALL_MARKER" ] || [ "$REQUIREMENTS" -nt "$INSTALL_MARKER" ]; then
+        info "Installing FAST CLI Python dependencies"
+        "$VENV_DIR/bin/python" -m pip install --disable-pip-version-check -r "$REQUIREMENTS"
+        touch "$INSTALL_MARKER"
+        info "Dependencies are ready"
+    fi
+}
+
+ensure_system_packages
+create_venv
+install_requirements_if_needed
+
+if [ "$#" -eq 0 ]; then
+    set -- --help
+fi
+
+exec "$VENV_DIR/bin/python" "$ROOT_DIR/cli.py" "$@"
