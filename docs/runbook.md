@@ -8,7 +8,7 @@ rules live in `docker/rules/local_rules.xml`; the scripts live under
 
 | FAST rule | Scenario | Level | Base/parent | Trigger |
 |---|---|---:|---|---|
-| `100200` | SSH failed authentication | 10 | Wazuh `5760` | each failed-password event classified by Wazuh rule `5760` |
+| `100200` | SSH authentication failure | 10 | Wazuh `5710` or `5760` | each invalid-user or failed-password/authentication event |
 | `100210` | Port-scan probe | 3 | Wazuh `4100` | one `FAST_PORTSCAN` kernel/firewall event |
 | `100211` | Port scan correlation | 7 | FAST `100210` | 8+ probes from one source IP in 60s |
 | `100220` | LOLBin signal | 6 | Wazuh `80792` | process named `httpd` executing from a non-standard path |
@@ -41,7 +41,7 @@ condition of rule `100200`.
 Expected chain:
 
 ```text
-5760 -> 100200
+5710 or 5760 -> 100200
 ```
 
 ## Port scan
