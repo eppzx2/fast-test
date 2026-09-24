@@ -74,14 +74,16 @@ attempts to reduce OpenSSH per-source penalty interference.
 Current detection behavior:
 
 ```text
-5760    sshd: authentication failed
-100200  FAST SSH failed authentication detected from source IP (...)   level 10
+5710/5760  sshd invalid-user or failed authentication
+100199     silent FAST staging rule (no_log)
+100200     FAST SSH brute-force correlation   level 10
 ```
 
-`100200` is a same-event child of Wazuh rules `5710` and `5760` using `<if_sid>5710,5760</if_sid>`.
-It is **not** currently a 5-events/60-seconds correlation rule. The simulator
-still requires at least five real authentication failures so the repeated-attack
-scenario is meaningful and transport failures are caught.
+Rule `100199` silently stages the base SSH failures. Rule `100200` fires only
+when the same source IP reaches 5 failures within 60 seconds. After firing,
+`ignore=60` suppresses repeat `100200` alerts for 60 seconds, so an
+8-attempt simulation produces one actionable FAST brute-force incident instead
+of one incident per failed login.
 
 ## 4. Port-scan test
 
