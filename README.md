@@ -124,14 +124,25 @@ API routes:
 
 ## Collector CLI
 
+Recommended: use the bootstrap runner. On first use it installs missing
+`python3-venv`/`python3-pip` on apt-based systems, creates `.venv`, installs
+`requirements.txt`, and then runs `cli.py` with the virtualenv Python.
+There is no separate activation step.
+
 ```bash
-python -m pip install -r requirements.txt
-python cli.py --init-db
-python cli.py --fetch
-python cli.py --show
-python cli.py --export csv
-python cli.py --export json
-python cli.py --export wazuh
+bash bin/fast-cli --help
+bash bin/fast-cli --init-db
+bash bin/fast-cli --fetch
+bash bin/fast-cli --show
+bash bin/fast-cli --export csv
+bash bin/fast-cli --export json
+bash bin/fast-cli --export wazuh
+```
+
+If no arguments are supplied, the wrapper shows CLI help:
+
+```bash
+bash bin/fast-cli
 ```
 
 Wazuh CDB export accepts only validated IPv4/IPv4-CIDR keys; malformed and
