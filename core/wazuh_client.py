@@ -214,6 +214,18 @@ class WazuhClient:
             audit_data = source.get("audit") or {}
             mitre = rule.get("mitre") or {}
             rule_id = str(rule.get("id") or "")
+            agent_ip = agent.get("ip") or ""
+            event_source_ip = (
+                event_data.get("srcip")
+                or event_data.get("src_ip")
+                or ""
+            )
+            source_ip = event_source_ip or agent_ip
+            source_ip_origin = (
+                "event"
+                if event_source_ip
+                else ("agent" if agent_ip else "")
+            )
             items.append(
                 {
                     "event_id": hit.get("_id") or "",
@@ -228,12 +240,9 @@ class WazuhClient:
                     "mitre_techniques": mitre.get("technique") or [],
                     "agent_id": str(agent.get("id") or ""),
                     "agent_name": agent.get("name") or "Unknown",
-                    "agent_ip": agent.get("ip") or "",
-                    "source_ip": (
-                        event_data.get("srcip")
-                        or event_data.get("src_ip")
-                        or ""
-                    ),
+                    "agent_ip": agent_ip,
+                    "source_ip": source_ip,
+                    "source_ip_origin": source_ip_origin,
                     "destination_ip": (
                         event_data.get("dstip")
                         or event_data.get("dst_ip")
