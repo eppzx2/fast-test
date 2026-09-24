@@ -46,11 +46,11 @@ def test_frequency_context_rules_use_if_matched():
             )
 
 
-def test_ssh_failed_auth_rule_promotes_wazuh_5760_to_fast_100200():
+def test_ssh_failed_auth_rule_promotes_common_wazuh_ssh_failures_to_fast_100200():
     rules_by_id = {rule.attrib["id"]: rule for rule in _rules()}
     rule = rules_by_id["100200"]
 
-    assert rule.findtext("if_sid") == "5760"
+    assert rule.findtext("if_sid") == "5710,5760"
     assert rule.find("if_matched_sid") is None
     assert rule.find("if_matched_group") is None
     assert rule.find("same_source_ip") is None
@@ -58,7 +58,7 @@ def test_ssh_failed_auth_rule_promotes_wazuh_5760_to_fast_100200():
     assert "timeframe" not in rule.attrib
     assert rule.attrib["level"] == "10"
     assert rule.findtext("description") == (
-        "FAST SSH failed authentication detected from source IP ($(srcip))."
+        "FAST SSH authentication failure detected from source IP ($(srcip))."
     )
 
 
