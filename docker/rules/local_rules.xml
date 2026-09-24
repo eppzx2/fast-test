@@ -50,9 +50,29 @@
      deliberately non-existent username, which can match 5710 instead of 5760.
      ============================================================ -->
 <group name="local,ssh_brute_force,">
-  <rule id="100200" level="10">
+  <!--
+    Silent staging rule. It keeps individual SSH authentication failures
+    available to Wazuh correlation without creating one FAST incident per
+    failed login. Level 1 + no_log is intentional: level 0 rules are not
+    retained for if_matched_sid correlation.
+  -->
+  <rule id="100199" level="1">
     <if_sid>5710,5760</if_sid>
-    <description>FAST SSH authentication failure detected from source IP ($(srcip)).</description>
+    <description>FAST SSH authentication failure staging event from source IP ($(srcip)).</description>
+    <options>no_log</options>
+    <group>authentication_failures,ssh_brute_force_stage,</group>
+  </rule>
+
+  <!--
+    Raise one brute-force alert when the same source IP reaches five failed
+    SSH authentications inside 60 seconds. Suppress repeat alerts for 60
+    seconds after firing so a burst creates one actionable incident instead
+    of alert noise for every additional failed password.
+  -->
+  <rule id="100200" level="10" frequency="5" timeframe="60" ignore="60">
+    <if_matched_sid>100199</if_matched_sid>
+    <same_srcip />
+    <description>FAST SSH brute-force detected: 5+ authentication failures from source IP ($(srcip)) within 60 seconds.</description>
     <mitre>
       <id>T1110</id>
     </mitre>
