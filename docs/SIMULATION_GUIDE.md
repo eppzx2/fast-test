@@ -165,7 +165,7 @@ checks and excludes `tests/acceptance`.
 | Symptom | Check |
 |---|---|
 | No SSH base alert | target `journalctl -u ssh`; agent Active; journald collection |
-| `5710`/`5760` but no `100200` | deployed rule `100200` must use `<if_sid>5710,5760</if_sid>`; run `wazuh-analysisd -t` |
+| `5710`/`5760` but no `100200` | confirm `100199` stages them and `100200` uses `<if_matched_sid>100199</if_matched_sid>`, `frequency=5`, `timeframe=60`, `same_srcip`; run `wazuh-analysisd -t` |
 | SSH simulator reports fewer than 5 real failures | check target password-auth path and OpenSSH per-source penalties |
 | No port-scan marker | rerun `setup_prereqs.sh`; inspect `iptables -t mangle -S PREROUTING` |
 | `100210` but no `100211` | confirm 8+ probes from the same `srcip` inside 60 seconds |
