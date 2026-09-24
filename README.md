@@ -74,7 +74,7 @@ Manager alone is not enough for `FAST [ HEALTHY ]`.
 
 | Rule | Detection | Level |
 |---|---|---:|
-| `100200` | SSH authentication failure (`5710` invalid-user or `5760` failed-password/auth error) | 10 |
+| `100199` | silent SSH failure staging rule (`5710`/`5760`) | 1 / no_log |\n| `100200` | 5+ SSH failures from the same source IP in 60s; one alert, 60s suppression | 10 |
 | `100210` | individual deterministic FAST port-scan probe | 3 |
 | `100211` | 8+ probes from one source in 60s | 7 |
 | `100220` | `httpd`-named process from unexpected path | 6 |
