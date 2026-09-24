@@ -7,7 +7,7 @@ DETECTIONS = [
         "attack_type": "SSH brute-force",
         "level": 10,
         "mitre": ["T1110"],
-        "description": "Promotes Wazuh rule 5760 failed SSH authentication events into the FAST detection namespace.",
+        "description": "Promotes common Wazuh SSH authentication failures (5710 invalid-user and 5760 failed-password/authentication errors) into the FAST detection namespace.",
         "status": "enabled",
         "validation_command": "./tests/acceptance/sim/simulate_brute_force.sh <TARGET_IP> nonexistent_bruteforce_test_user 8",
         "validation_host": "runner",
