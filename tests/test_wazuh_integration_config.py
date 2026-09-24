@@ -46,19 +46,24 @@ def test_frequency_context_rules_use_if_matched():
             )
 
 
-def test_ssh_failed_auth_rule_promotes_common_wazuh_ssh_failures_to_fast_100200():
+def test_ssh_bruteforce_rule_correlates_failures_without_alert_flood():
     rules_by_id = {rule.attrib["id"]: rule for rule in _rules()}
+    stage = rules_by_id["100199"]
     rule = rules_by_id["100200"]
 
-    assert rule.findtext("if_sid") == "5710,5760"
-    assert rule.find("if_matched_sid") is None
-    assert rule.find("if_matched_group") is None
+    assert stage.findtext("if_sid") == "5710,5760"
+    assert stage.attrib["level"] == "1"
+    assert stage.findtext("options") == "no_log"
+
+    assert rule.findtext("if_matched_sid") == "100199"
+    assert rule.find("same_srcip") is not None
     assert rule.find("same_source_ip") is None
-    assert "frequency" not in rule.attrib
-    assert "timeframe" not in rule.attrib
+    assert rule.attrib["frequency"] == "5"
+    assert rule.attrib["timeframe"] == "60"
+    assert rule.attrib["ignore"] == "60"
     assert rule.attrib["level"] == "10"
     assert rule.findtext("description") == (
-        "FAST SSH authentication failure detected from source IP ($(srcip))."
+        "FAST SSH brute-force detected: 5+ authentication failures from source IP ($(srcip)) within 60 seconds."
     )
 
 
