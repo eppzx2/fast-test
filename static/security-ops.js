@@ -5,7 +5,8 @@
   const nativeFetch = window.fetch.bind(window);
   const auth = { enabled:false, username:"local", role:"admin", csrf:"" };
   const rank = {viewer:10, analyst:20, admin:30};
-  let selectedCase = null;
+  let selectedCaseId = "";
+  let incidentItems = [];
 
   const text = (v) => String(v ?? "");
   const html = (v) => text(v).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]));
@@ -75,71 +76,127 @@
   function installIncidents(){
     if($("view-incidents")) return; const main=document.querySelector("main.main"); if(!main) return;
     const s=document.createElement("section"); s.className="view"; s.id="view-incidents";
-    s.innerHTML=`<div class="section-head"><div><h2>Incident Workflow</h2><p>Wazuh remains the alert source of truth; FAST stores only analyst status, assignee and notes.</p></div><button class="btn" id="refreshIncidents">Refresh</button></div>
+    s.innerHTML=`<div class="section-head"><div><h2>Incident Workflow</h2><p>Real Wazuh detections with expandable alert context and analyst workflow state.</p></div><button class="btn" id="refreshIncidents">Refresh</button></div>
     <div class="ops-metrics"><div class="card ops-metric"><span>Open</span><strong id="incOpen">0</strong></div><div class="card ops-metric"><span>Critical / High</span><strong id="incHigh">0</strong></div><div class="card ops-metric"><span>Correlations</span><strong id="incCorr">0</strong></div></div>
-    <div class="platform-grid incident-layout"><div class="card table-card"><div class="card-head padded-head"><div><div class="card-kicker">Real Wazuh detections</div><div class="card-title">Detection Cases</div></div><span class="live-badge" id="incBadge">LIVE</span></div><div class="table-scroll"><table id="incidentTable"><thead><tr><th>Time</th><th>Detection</th><th>Agent</th><th>Source</th><th>Priority</th><th>Status</th><th>Assignee</th><th></th></tr></thead><tbody id="incBody"></tbody></table><div class="platform-empty" id="incEmpty">No FAST detection cases.</div></div></div>
-    <div class="card case-panel"><div class="card-head"><div><div class="card-kicker">Analyst workspace</div><div class="card-title">Incident Details</div></div></div><div id="caseEmpty" class="platform-empty compact">Select a case.</div><div id="caseEditor" hidden><div class="case-summary" id="caseSummary"></div><label class="ops-label">Status</label><select class="control" id="caseStatus"><option value="new">New</option><option value="investigating">Investigating</option><option value="resolved">Resolved</option><option value="false_positive">False Positive</option></select><label class="ops-label">Assignee</label><input class="control" id="caseAssignee" maxlength="120"><label class="ops-label">Notes</label><textarea class="control ops-textarea" id="caseNotes" maxlength="4000"></textarea><button class="btn btn-primary full-width" id="saveCase">Save Analyst State</button><div class="platform-source-note" id="casePermission"></div></div></div></div>
+    <div class="card table-card incident-card"><div class="card-head padded-head"><div><div class="card-kicker">Real Wazuh detections</div><div class="card-title">Detection Cases</div></div><span class="live-badge" id="incBadge">LIVE</span></div><div class="table-scroll"><table id="incidentTable"><thead><tr><th>Time</th><th>Detection</th><th>Agent</th><th>Source</th><th>Priority</th><th>Status</th><th>Assignee</th><th></th></tr></thead><tbody id="incBody"></tbody></table><div class="platform-empty" id="incEmpty">No FAST detection cases.</div></div></div>
     <div class="card" style="margin-top:16px"><div class="card-head"><div><div class="card-kicker">Correlation engine</div><div class="card-title">Related Activity</div></div><span class="live-badge">REAL ALERTS ONLY</span></div><div id="corrList" class="correlation-list"></div></div>`;
-    main.insertBefore(s,$("view-detections")); $("refreshIncidents").onclick=loadIncidents; $("saveCase").onclick=saveCase;
+    main.insertBefore(s,$("view-detections")); $("refreshIncidents").onclick=loadIncidents;
+  }
+
+  function caseDetailMarkup(item){
+    const detail=(label,value,mono=false,wide=false)=>`<div class="case-detail${wide?" wide":""}"><span>${html(label)}</span><strong class="${mono?"mono":""}">${html(value||"—")}</strong></div>`;
+    const mitreIds=(item.mitre_ids||[]).join(", ");
+    const mitreTactics=(item.mitre_tactics||[]).join(", ");
+    const mitreTechniques=(item.mitre_techniques||[]).join(", ");
+    const sourceLabel=item.source_ip_origin==="agent"?"Source IP (host/local event)":"Source IP";
+    const statusOption=(value,label)=>`<option value="${value}" ${item.status===value?"selected":""}>${label}</option>`;
+    return `<div class="incident-detail-shell">
+      <div class="case-summary">
+        <div class="case-headline">
+          <div><strong>${html(item.attack_type||"FAST detection")}</strong><span class="case-rule-line">Rule ${html(item.rule_id||"—")} · ${html(when(item.timestamp))}</span></div>
+          <span class="priority ${html(item.priority||"low")}">${html(item.priority||"low")}</span>
+        </div>
+        <p class="case-description">${html(item.description||"No alert description supplied by Wazuh.")}</p>
+        <div class="case-detail-grid">
+          ${detail("Host / Agent",item.agent_name||item.agent_id||"Unknown")}
+          ${detail("Agent IP",item.agent_ip,true)}
+          ${detail(sourceLabel,item.source_ip,true)}
+          ${detail("Source Port",item.source_port,true)}
+          ${detail("Destination IP",item.destination_ip,true)}
+          ${detail("Destination Port",item.destination_port,true)}
+          ${detail("Rule ID",item.rule_id,true)}
+          ${detail("Severity / Level",item.level,true)}
+          ${detail("Process",item.process_name,true)}
+          ${detail("Executable",item.process_executable,true,true)}
+          ${detail("MITRE Tactic",mitreTactics,false,true)}
+          ${detail("MITRE Technique",mitreTechniques,false,true)}
+          ${detail("MITRE ID",mitreIds,true,true)}
+          ${detail("Log Location",item.location,true,true)}
+          ${detail("Decoder",item.decoder,true)}
+          ${detail("Manager",item.manager,true)}
+          ${detail("Event ID",item.event_id,true,true)}
+          ${item.full_log?detail("Raw Event",item.full_log,true,true):""}
+        </div>
+      </div>
+      <div class="case-workflow">
+        <div class="case-workflow-grid">
+          <label class="ops-label">Status<select class="control case-status-input">
+            ${statusOption("new","New")}
+            ${statusOption("investigating","Investigating")}
+            ${statusOption("resolved","Resolved")}
+            ${statusOption("false_positive","False Positive")}
+          </select></label>
+          <label class="ops-label">Assignee<input class="control case-assignee-input" maxlength="120" value="${html(item.assignee||"")}"></label>
+        </div>
+        <label class="ops-label">Notes<textarea class="control ops-textarea case-notes-input" maxlength="4000">${html(item.notes||"")}</textarea></label>
+        <div class="case-save-row">
+          <button class="btn btn-primary case-save">Save Analyst State</button>
+          <span class="case-save-feedback"></span>
+        </div>
+        <div class="platform-source-note case-permission"></div>
+      </div>
+    </div>`;
+  }
+
+  function toggleCase(eventId){
+    const id=String(eventId||"");
+    selectedCaseId=selectedCaseId===id?"":id;
+    renderIncidents(incidentItems);
   }
 
   function renderIncidents(items){
+    incidentItems=items;
     const body=$("incBody"); body.textContent="";
-    items.forEach(item=>{ const tr=document.createElement("tr");
+    items.forEach(item=>{
+      const eventId=String(item.event_id||"");
+      const expanded=selectedCaseId===eventId;
+      const tr=document.createElement("tr"); tr.className="incident-row"+(expanded?" expanded":""); tr.dataset.eventId=eventId;
       const cols=[when(item.timestamp),item.attack_type||"FAST detection",item.agent_name||item.agent_id||"Unknown",item.source_ip||"—"];
       cols.forEach((v,i)=>{const td=document.createElement("td"); if(i===0||i===3)td.className="mono"; td.textContent=text(v); tr.appendChild(td);});
       const pr=document.createElement("td"); pr.innerHTML=`<span class="priority ${html(item.priority)}">${html(item.priority)}</span>`;
-      const st=document.createElement("td"); st.innerHTML=`<span class="case-status ${html(item.status)}">${html(item.status).replace("_"," ")}</span>`;
-      const as=document.createElement("td"); as.textContent=item.assignee||"Unassigned";
-      const act=document.createElement("td"); const b=document.createElement("button"); b.className="btn btn-small"; b.textContent="Open"; b.onclick=()=>selectCase(item); act.appendChild(b);
+      const st=document.createElement("td"); st.className="incident-status-cell"; st.innerHTML=`<span class="case-status ${html(item.status)}">${html(item.status).replace("_"," ")}</span>`;
+      const as=document.createElement("td"); as.className="incident-assignee-cell"; as.textContent=item.assignee||"Unassigned";
+      const act=document.createElement("td"); const b=document.createElement("button"); b.className="btn btn-small incident-open"; b.textContent=expanded?"Close":"Open"; b.setAttribute("aria-expanded",expanded?"true":"false"); b.onclick=()=>toggleCase(eventId); act.appendChild(b);
       tr.append(pr,st,as,act); body.appendChild(tr);
+
+      if(expanded){
+        const detailRow=document.createElement("tr"); detailRow.className="incident-detail-row"; detailRow.dataset.eventId=eventId;
+        const td=document.createElement("td"); td.colSpan=8; td.innerHTML=caseDetailMarkup(item); detailRow.appendChild(td); body.appendChild(detailRow);
+        const writable=!auth.enabled||can("analyst");
+        td.querySelectorAll(".case-status-input,.case-assignee-input,.case-notes-input,.case-save").forEach(el=>el.disabled=!writable);
+        const permission=td.querySelector(".case-permission");
+        permission.textContent=writable?"Analyst state is stored by FAST and every update is audited. Wazuh alert data stays read-only.":"Analyst role required to update cases.";
+        td.querySelector(".case-save").addEventListener("click",()=>saveCase(item,td));
+      }
     });
     $("incEmpty").style.display=items.length?"none":"block";
     $("incOpen").textContent=items.filter(x=>!["resolved","false_positive"].includes(x.status)).length;
     $("incHigh").textContent=items.filter(x=>["critical","high"].includes(x.priority)).length;
   }
 
-  function selectCase(item){
-    selectedCase=item; $("caseEmpty").hidden=true; $("caseEditor").hidden=false;
-    const detail=(label,value,mono=false,wide=false)=>`<div class="case-detail${wide?" wide":""}"><span>${html(label)}</span><strong class="${mono?"mono":""}">${html(value||"—")}</strong></div>`;
-    const mitreIds=(item.mitre_ids||[]).join(", ");
-    const mitreTactics=(item.mitre_tactics||[]).join(", ");
-    const mitreTechniques=(item.mitre_techniques||[]).join(", ");
-    $("caseSummary").innerHTML=`
-      <div class="case-headline">
-        <strong>${html(item.attack_type||"FAST detection")}</strong>
-        <span class="priority ${html(item.priority||"low")}">${html(item.priority||"low")}</span>
-      </div>
-      <p class="case-description">${html(item.description||"No alert description supplied by Wazuh.")}</p>
-      <div class="case-detail-grid">
-        ${detail("Host / Agent",item.agent_name||item.agent_id||"Unknown")}
-        ${detail("Agent IP",item.agent_ip,true)}
-        ${detail("Source IP",item.source_ip,true)}
-        ${detail("Source Port",item.source_port,true)}
-        ${detail("Destination IP",item.destination_ip,true)}
-        ${detail("Destination Port",item.destination_port,true)}
-        ${detail("Rule ID",item.rule_id,true)}
-        ${detail("Severity / Level",item.level,true)}
-        ${detail("Timestamp",when(item.timestamp),true,true)}
-        ${detail("Process",item.process_name,true)}
-        ${detail("Executable",item.process_executable,true,true)}
-        ${detail("MITRE Tactic",mitreTactics,false,true)}
-        ${detail("MITRE Technique",mitreTechniques,false,true)}
-        ${detail("MITRE ID",mitreIds,true,true)}
-        ${detail("Log Location",item.location,true,true)}
-        ${detail("Decoder",item.decoder,true)}
-        ${detail("Manager",item.manager,true)}
-        ${detail("Event ID",item.event_id,true,true)}
-      </div>`;
-    $("caseStatus").value=item.status||"new"; $("caseAssignee").value=item.assignee||""; $("caseNotes").value=item.notes||"";
-    const writable=!auth.enabled||can("analyst"); [$("caseStatus"),$("caseAssignee"),$("caseNotes"),$("saveCase")].forEach(el=>el.disabled=!writable);
-    $("casePermission").textContent=writable?"Analyst state is audited; Wazuh alert data is read-only.":"Analyst role required to update cases.";
-  }
-
-  async function saveCase(){
-    if(!selectedCase) return; const btn=$("saveCase"); btn.disabled=true;
-    try{ await api(`/api/security/incidents/${encodeURIComponent(selectedCase.event_id)}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({status:$("caseStatus").value,assignee:$("caseAssignee").value,notes:$("caseNotes").value})}); await loadIncidents(); }
-    catch(e){ $("casePermission").textContent=e.message; } finally{btn.disabled=auth.enabled&&!can("analyst");}
+  async function saveCase(item,container){
+    const btn=container.querySelector(".case-save");
+    const feedback=container.querySelector(".case-save-feedback");
+    const status=container.querySelector(".case-status-input").value;
+    const assignee=container.querySelector(".case-assignee-input").value;
+    const notes=container.querySelector(".case-notes-input").value;
+    btn.disabled=true; btn.textContent="Saving…"; feedback.className="case-save-feedback"; feedback.textContent="";
+    try{
+      const data=await api(`/api/security/incidents/${encodeURIComponent(item.event_id)}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({status,assignee,notes})});
+      Object.assign(item,data.item||{},{status,assignee,notes});
+      const summary=[...$("incBody").querySelectorAll(".incident-row")].find(row=>row.dataset.eventId===String(item.event_id));
+      if(summary){
+        summary.querySelector(".incident-status-cell").innerHTML=`<span class="case-status ${html(item.status)}">${html(item.status).replace("_"," ")}</span>`;
+        summary.querySelector(".incident-assignee-cell").textContent=item.assignee||"Unassigned";
+      }
+      $("incOpen").textContent=incidentItems.filter(x=>!["resolved","false_positive"].includes(x.status)).length;
+      feedback.className="case-save-feedback success"; feedback.textContent="Saved ✓";
+      btn.textContent="Saved ✓";
+      setTimeout(()=>{if(btn.isConnected){btn.textContent="Save Analyst State";btn.disabled=auth.enabled&&!can("analyst");}},1200);
+    }catch(e){
+      feedback.className="case-save-feedback error"; feedback.textContent=`Save failed: ${e.message}`;
+      btn.textContent="Save Analyst State"; btn.disabled=auth.enabled&&!can("analyst");
+    }
   }
 
   function renderCorrelations(items){
@@ -210,5 +267,5 @@
 
   installNav(); installIncidents(); installValidation(); enhanceDetections(); enhanceArchitecture(); installAudit(); hookExistingNav();
   initAuth();
-  setInterval(()=>{if($("view-incidents")?.classList.contains("active"))loadIncidents();if($("view-validation")?.classList.contains("active"))loadValidation();},12000);
+  setInterval(()=>{if($("view-incidents")?.classList.contains("active")&&!selectedCaseId)loadIncidents();if($("view-validation")?.classList.contains("active"))loadValidation();},12000);
 })();
