@@ -67,4 +67,4 @@ if [ "$real_failures" -lt "$MIN_REAL_FAILURES" ]; then
     exit 1
 fi
 
-echo "[OK] Generated $real_failures real failed SSH authentications. FAST rule 100200 should fire within 60s."
+echo "[OK] Generated $real_failures real failed SSH authentications. FAST rule 100200 should produce one correlated brute-force alert after 5 failures from the same source IP within 60s."
