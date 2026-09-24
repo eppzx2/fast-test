@@ -108,7 +108,8 @@ fi
 # "Extra content at the end of the document" error. Validate with Wazuh's
 # own agent parser instead.
 if [ -x /var/ossec/bin/wazuh-agentd ]; then
-    /var/ossec/bin/wazuh-agentd -t         || fail "Invalid Wazuh agent configuration"
+    /var/ossec/bin/wazuh-agentd -t \
+        || fail "Invalid Wazuh agent configuration"
 else
     fail "Wazuh agent validator was not found at /var/ossec/bin/wazuh-agentd"
 fi
