@@ -43,16 +43,16 @@
 
 <!-- ============================================================
      SSH FAILED AUTHENTICATION
-     Wazuh v4.9 rule 5760 is the concrete failed-password SSH rule:
-       <if_sid>5700,5716</if_sid>
-       <match>Failed password|Failed keyboard|authentication error</match>
-     FAST promotes that base event to its own rule ID so Threat Hunting
-     shows rule 100200 for the SSH failed-authentication detection.
+     FAST accepts both common Wazuh SSH failure parents:
+       5710 = invalid/non-existent user
+       5760 = failed password / authentication error
+     This matters because the bundled brute-force simulator defaults to a
+     deliberately non-existent username, which can match 5710 instead of 5760.
      ============================================================ -->
 <group name="local,ssh_brute_force,">
   <rule id="100200" level="10">
-    <if_sid>5760</if_sid>
-    <description>FAST SSH failed authentication detected from source IP ($(srcip)).</description>
+    <if_sid>5710,5760</if_sid>
+    <description>FAST SSH authentication failure detected from source IP ($(srcip)).</description>
     <mitre>
       <id>T1110</id>
     </mitre>
