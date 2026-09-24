@@ -83,7 +83,9 @@ def test_recent_alerts_reads_fast_rules_from_indexer(monkeypatch):
                                     "timestamp": "2026-09-12T12:05:00Z",
                                     "rule": {"id": "100200", "level": 10, "description": "FAST SSH failed authentication detected"},
                                     "agent": {"id": "001", "name": "ebi-VMware", "ip": "100.64.0.20"},
-                                    "data": {"srcip": "100.64.0.30"},
+                                    "data": {"srcip": "100.64.0.30", "dstip": "100.64.0.20", "srcport": "51515", "dstport": "22"},
+                                    "audit": {"command": "httpd", "exe": "/tmp/httpd"},
+                                    "full_log": "sample raw event",
                                 },
                             }
                         ],
@@ -97,7 +99,15 @@ def test_recent_alerts_reads_fast_rules_from_indexer(monkeypatch):
 
     assert result["source"] == "wazuh-indexer"
     assert result["items"][0]["attack_type"] == "SSH brute-force"
-    assert result["items"][0]["source_ip"] == "100.64.0.30"
+    alert = result["items"][0]
+    assert alert["source_ip"] == "100.64.0.30"
+    assert alert["agent_ip"] == "100.64.0.20"
+    assert alert["destination_ip"] == "100.64.0.20"
+    assert alert["source_port"] == "51515"
+    assert alert["destination_port"] == "22"
+    assert alert["process_name"] == "httpd"
+    assert alert["process_executable"] == "/tmp/httpd"
+    assert alert["full_log"] == "sample raw event"
     body = session.calls[0][2]["json"]
     assert body["query"]["bool"]["filter"][1] == {"terms": {"rule.id": ["100200"]}}
     assert session.calls[0][1].endswith("/wazuh-alerts-*/_search")
