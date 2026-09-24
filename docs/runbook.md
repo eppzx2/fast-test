@@ -8,40 +8,41 @@ rules live in `docker/rules/local_rules.xml`; the scripts live under
 
 | FAST rule | Scenario | Level | Base/parent | Trigger |
 |---|---|---:|---|---|
-| `100199` | SSH failure staging | 1 / no_log | Wazuh `5710` or `5760` | each invalid-user or failed-password/authentication event, not logged |\n| `100200` | SSH brute force | 10 | FAST `100199` | 5+ failures from one source IP in 60s; 60s suppression after firing |
+| `100199` | SSH failure staging | 1 / no_log | Wazuh `5710` or `5760` | each invalid-user or failed-password/authentication event, not logged |
+| `100200` | SSH brute force | 10 | FAST `100199` | 5+ failures from one source IP in 60s; 60s suppression after firing |
 | `100210` | Port-scan probe | 3 | Wazuh `4100` | one `FAST_PORTSCAN` kernel/firewall event |
 | `100211` | Port scan correlation | 7 | FAST `100210` | 8+ probes from one source IP in 60s |
 | `100220` | LOLBin signal | 6 | Wazuh `80792` | process named `httpd` executing from a non-standard path |
 | `100221` | LOLBin confirmed | 12 | FAST `100220` | same audit event also contains wget-style command-line evidence |
 
-## SSH failed authentication
+## SSH brute-force correlation
 
-Wazuh 4.9 classifies the simulated failed-password event with rule `5760`
-(`sshd: authentication failed`). FAST promotes that event to its own rule ID:
+The simulator defaults to a deliberately non-existent username, which Wazuh can
+classify as rule `5710`; ordinary failed-password/authentication errors can be
+classified as `5760`. FAST does not create an incident for every one of those
+events. It stages them silently and correlates them by source IP:
 
 ```xml
-<rule id="100200" level="10">
-  <if_sid>5760</if_sid>
-  <description>FAST SSH failed authentication detected from source IP ($(srcip)).</description>
+<rule id="100199" level="1">
+  <if_sid>5710,5760</if_sid>
+  <options>no_log</options>
+</rule>
+
+<rule id="100200" level="10" frequency="5" timeframe="60" ignore="60">
+  <if_matched_sid>100199</if_matched_sid>
+  <same_srcip />
   ...
 </rule>
 ```
 
-This means Threat Hunting should show FAST rule `100200` for a matching SSH
-failed-authentication event. Rule `100200` is currently a **same-event child**;
-it does not use `frequency`, `timeframe`, `if_matched_sid`, or
-`same_source_ip`.
-
-The script is still named `simulate_brute_force.sh` because it generates a
-repeated wrong-password scenario. It deliberately requires at least five real
-authentication failures before declaring the simulation successful, but that
-minimum belongs to the simulator's transport validation — it is not the trigger
-condition of rule `100200`.
+This design reduces alert noise: the fifth SSH authentication failure from the
+same source IP inside 60 seconds raises one `100200` brute-force alert. Wazuh
+then suppresses repeat `100200` alerts for the next 60 seconds.
 
 Expected chain:
 
 ```text
-5710 or 5760 -> 100200
+5710 or 5760 -> 100199 (silent) -> 100200 (one correlated alert)
 ```
 
 ## Port scan
