@@ -101,6 +101,7 @@ def test_recent_alerts_reads_fast_rules_from_indexer(monkeypatch):
     assert result["items"][0]["attack_type"] == "SSH brute-force"
     alert = result["items"][0]
     assert alert["source_ip"] == "100.64.0.30"
+    assert alert["source_ip_origin"] == "event"
     assert alert["agent_ip"] == "100.64.0.20"
     assert alert["destination_ip"] == "100.64.0.20"
     assert alert["source_port"] == "51515"
@@ -111,3 +112,36 @@ def test_recent_alerts_reads_fast_rules_from_indexer(monkeypatch):
     body = session.calls[0][2]["json"]
     assert body["query"]["bool"]["filter"][1] == {"terms": {"rule.id": ["100200"]}}
     assert session.calls[0][1].endswith("/wazuh-alerts-*/_search")
+
+
+def test_local_lolbin_uses_agent_ip_as_source_context(monkeypatch):
+    monkeypatch.setenv("FAST_WAZUH_INDEXER_URL", "https://indexer:9200")
+    session = FakeSession(
+        [
+            FakeResponse(
+                {
+                    "hits": {
+                        "total": {"value": 1, "relation": "eq"},
+                        "hits": [
+                            {
+                                "_id": "lolbin-1",
+                                "_source": {
+                                    "timestamp": "2026-09-24T10:00:00Z",
+                                    "rule": {"id": "100221", "level": 12, "description": "LOLBin confirmed"},
+                                    "agent": {"id": "002", "name": "kali", "ip": "100.90.0.15"},
+                                    "audit": {"command": "httpd", "exe": "/tmp/httpd"},
+                                },
+                            }
+                        ],
+                    }
+                }
+            )
+        ]
+    )
+    client = WazuhClient(session=session)
+    result = client.recent_alerts(rule_ids=["100221"], limit=10, minutes=15)
+
+    alert = result["items"][0]
+    assert alert["source_ip"] == "100.90.0.15"
+    assert alert["source_ip_origin"] == "agent"
+    assert alert["agent_ip"] == "100.90.0.15"
