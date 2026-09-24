@@ -184,6 +184,11 @@ class WazuhClient:
                 "data.dst_ip",
                 "data.srcport",
                 "data.dstport",
+                "data.command",
+                "data.exe",
+                "audit.command",
+                "audit.exe",
+                "full_log",
             ],
         }
         response = self._request(
@@ -206,6 +211,7 @@ class WazuhClient:
             rule = source.get("rule") or {}
             agent = source.get("agent") or {}
             event_data = source.get("data") or {}
+            audit_data = source.get("audit") or {}
             mitre = rule.get("mitre") or {}
             rule_id = str(rule.get("id") or "")
             items.append(
@@ -235,9 +241,20 @@ class WazuhClient:
                     ),
                     "source_port": event_data.get("srcport") or "",
                     "destination_port": event_data.get("dstport") or "",
+                    "process_name": (
+                        audit_data.get("command")
+                        or event_data.get("command")
+                        or ""
+                    ),
+                    "process_executable": (
+                        audit_data.get("exe")
+                        or event_data.get("exe")
+                        or ""
+                    ),
                     "location": source.get("location") or "",
                     "decoder": (source.get("decoder") or {}).get("name") or "",
                     "manager": (source.get("manager") or {}).get("name") or "",
+                    "full_log": source.get("full_log") or "",
                 }
             )
 
