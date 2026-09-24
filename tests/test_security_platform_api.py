@@ -55,3 +55,24 @@ def test_detection_health_uses_exact_rule_activity(tmp_path, monkeypatch):
     by_id = {item["id"]: item for item in response.get_json()["items"]}
     assert by_id["100200"]["alerts_24h"] == 5
     assert by_id["100200"]["active_agents"] == 1
+
+
+def test_incident_analyst_state_patch_persists(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    with patch("core.platform_api.get_wazuh_client") as factory:
+        factory.return_value.recent_alerts.return_value = {
+            "items": [{"event_id": "alert-1", "rule_id": "100200", "level": 10}],
+            "total": 1,
+            "sampled": False,
+        }
+        response = client.patch(
+            "/api/security/incidents/alert-1",
+            json={"status": "investigating", "assignee": "alice", "notes": "Checking source host"},
+        )
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["message"] == "Analyst state saved"
+    assert payload["item"]["status"] == "investigating"
+    assert payload["item"]["assignee"] == "alice"
+    stored = security_ops.get_incident_states(["alert-1"])["alert-1"]
+    assert stored["notes"] == "Checking source host"
