@@ -78,7 +78,7 @@ Current detection behavior:
 100200  FAST SSH failed authentication detected from source IP (...)   level 10
 ```
 
-`100200` is a same-event child of Wazuh rule `5760` using `<if_sid>5760</if_sid>`.
+`100200` is a same-event child of Wazuh rules `5710` and `5760` using `<if_sid>5710,5760</if_sid>`.
 It is **not** currently a 5-events/60-seconds correlation rule. The simulator
 still requires at least five real authentication failures so the repeated-attack
 scenario is meaningful and transport failures are caught.
@@ -165,7 +165,7 @@ checks and excludes `tests/acceptance`.
 | Symptom | Check |
 |---|---|
 | No SSH base alert | target `journalctl -u ssh`; agent Active; journald collection |
-| `5760` but no `100200` | deployed rule `100200` must use `<if_sid>5760</if_sid>`; run `wazuh-analysisd -t` |
+| `5710`/`5760` but no `100200` | deployed rule `100200` must use `<if_sid>5710,5760</if_sid>`; run `wazuh-analysisd -t` |
 | SSH simulator reports fewer than 5 real failures | check target password-auth path and OpenSSH per-source penalties |
 | No port-scan marker | rerun `setup_prereqs.sh`; inspect `iptables -t mangle -S PREROUTING` |
 | `100210` but no `100211` | confirm 8+ probes from the same `srcip` inside 60 seconds |
