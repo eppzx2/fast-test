@@ -254,14 +254,14 @@ The setup:
 Current detection IDs:
 
 ```text
-SSH failed authentication:  Wazuh 5760 -> FAST 100200 (level 10)
+SSH authentication failure:  Wazuh 5710/5760 -> FAST 100200 (level 10)
 Port-scan probe:            Wazuh 4100 -> FAST 100210 (level 3)
 Port-scan correlation:      FAST 100210 -> FAST 100211 (level 7, 8+ probes/60s)
 LOLBin signal:              Wazuh 80792 -> FAST 100220 (level 6)
 LOLBin confirmation:        FAST 100220 -> FAST 100221 (level 12)
 ```
 
-Important: `100200` is currently a **same-event child** of Wazuh rule `5760`.
+Important: `100200` is currently a **same-event child** of Wazuh rules `5710` and `5760`.
 The brute-force simulator still sends multiple verified failed-password attempts
 as a repeatable stress scenario, but FAST `100200` itself is no longer a
 5-events-in-60-seconds correlation rule.
@@ -326,7 +326,7 @@ docker exec single-node-wazuh.manager-1 \
 
 ### SSH base alert appears but FAST `100200` does not
 
-Confirm the deployed custom rule file contains `100200` with `<if_sid>5760</if_sid>`
+Confirm the deployed custom rule file contains `100200` with `<if_sid>5710,5760</if_sid>`
 and validate the Manager configuration:
 
 ```bash
