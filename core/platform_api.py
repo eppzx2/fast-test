@@ -308,7 +308,7 @@ def register_platform_routes(app) -> None:
                 object_id=event_id,
                 details={"status": state["status"], "assignee": state["assignee"]},
             )
-            return jsonify({"status": "ok", "item": state})
+            return jsonify({"status": "ok", "message": "Analyst state saved", "item": state})
         except ValueError as exc:
             return jsonify({"status": "error", "message": str(exc)}), 400
         except WazuhIntegrationError as exc:
